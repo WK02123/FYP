@@ -1,0 +1,48 @@
+{
+  "project_info": {
+    "project_number": "522737219081",
+    "project_id": "shuttlebus-e0cef",
+    "storage_bucket": "shuttlebus-e0cef.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:522737219081:android:540cb8e7324fa04b292ad8",
+        "android_client_info": {
+          "package_name": "com.example.shuttlebus"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAv__AWZog-_uXGuv-ln06SXHmPBEAgwx8"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:522737219081:android:4637cbcf49c50f6f292ad8",
+        "android_client_info": {
+          "package_name": "inti.edu.shuttle_bus_app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAv__AWZog-_uXGuv-ln06SXHmPBEAgwx8"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
