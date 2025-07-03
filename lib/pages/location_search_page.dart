@@ -1,23 +1,53 @@
 import 'package:flutter/material.dart';
 
-class LocationSearchPage extends StatelessWidget {
+class LocationSearchPage extends StatefulWidget {
   final String title;
 
   const LocationSearchPage({super.key, required this.title});
 
   @override
-  Widget build(BuildContext context) {
-    final List<String> locations = [
-      'Relau',
-      'Bukit Jambul',
-      'Sg. Nibong',
-      'Lip Sin',
-      'Sungai Ara',
-      'Greenlane',
-      'Elit Avenue',
-      'INTI Penang',
-    ];
+  State<LocationSearchPage> createState() => _LocationSearchPageState();
+}
 
+class _LocationSearchPageState extends State<LocationSearchPage> {
+  final TextEditingController _searchController = TextEditingController();
+
+  final List<String> allLocations = [
+    'Relau',
+    'Bukit Jambul',
+    'Sg. Nibong',
+    'Lip Sin',
+    'Sungai Ara',
+    'Greenlane',
+    'Elit Avenue',
+    'INTI Penang',
+  ];
+
+  List<String> filteredLocations = [];
+
+  @override
+  void initState() {
+    super.initState();
+    filteredLocations = List.from(allLocations);
+
+    _searchController.addListener(() {
+      final query = _searchController.text.toLowerCase();
+      setState(() {
+        filteredLocations = allLocations
+            .where((loc) => loc.toLowerCase().contains(query))
+            .toList();
+      });
+    });
+  }
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.white,
       body: Column(
@@ -42,7 +72,7 @@ class LocationSearchPage extends StatelessWidget {
                 ),
                 const SizedBox(width: 10),
                 Text(
-                  title,
+                  widget.title,
                   style: const TextStyle(
                     color: Colors.white,
                     fontSize: 20,
@@ -55,11 +85,12 @@ class LocationSearchPage extends StatelessWidget {
 
           const SizedBox(height: 20),
 
-          // 🔍 Search bar (no filtering logic for now)
-          const Padding(
-            padding: EdgeInsets.symmetric(horizontal: 20),
+          // 🔍 Search bar
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 20),
             child: TextField(
-              decoration: InputDecoration(
+              controller: _searchController,
+              decoration: const InputDecoration(
                 hintText: 'Type to search location',
                 prefixIcon: Icon(Icons.search),
                 filled: true,
@@ -82,13 +113,13 @@ class LocationSearchPage extends StatelessWidget {
 
           Expanded(
             child: ListView.builder(
-              itemCount: locations.length,
+              itemCount: filteredLocations.length,
               itemBuilder: (context, index) {
                 return ListTile(
                   leading: const Icon(Icons.location_on),
-                  title: Text(locations[index]),
+                  title: Text(filteredLocations[index]),
                   onTap: () {
-                    Navigator.pop(context, locations[index]); // ✅ Return selected location
+                    Navigator.pop(context, filteredLocations[index]);
                   },
                 );
               },
