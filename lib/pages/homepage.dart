@@ -3,6 +3,8 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:shuttle_bus_app/pages/date_picker_page.dart';
 import 'package:shuttle_bus_app/pages/location_search_page.dart';
 import 'package:shuttle_bus_app/pages/schedule_page.dart';
+import 'package:shuttle_bus_app/pages/profile_page.dart';
+import 'login_page.dart'; // <-- redirect here after logout
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -30,7 +32,10 @@ class _HomePageState extends State<HomePage> {
             icon: const Icon(Icons.logout, color: Colors.white),
             onPressed: () async {
               await FirebaseAuth.instance.signOut();
-              Navigator.of(context).pushReplacementNamed('/login');
+              Navigator.pushReplacement(
+                context,
+                MaterialPageRoute(builder: (_) => const LoginPage()),
+              );
             },
           ),
         ],
@@ -38,8 +43,8 @@ class _HomePageState extends State<HomePage> {
       body: _selectedIndex == 0
           ? _buildMainContent()
           : _selectedIndex == 1
-          ? const Placeholder() // View Schedule Page
-          : _buildProfilePage(), // Profile Page
+          ? const Placeholder()
+          : _buildProfilePage(),
       bottomNavigationBar: BottomNavigationBar(
         currentIndex: _selectedIndex,
         selectedItemColor: Colors.red,
@@ -62,7 +67,6 @@ class _HomePageState extends State<HomePage> {
   Widget _buildMainContent() {
     return Column(
       children: [
-        // 🔴 Custom Header
         Container(
           width: double.infinity,
           height: 180,
@@ -89,10 +93,7 @@ class _HomePageState extends State<HomePage> {
             ],
           ),
         ),
-
         const SizedBox(height: 20),
-
-        // 🔘 Form Section
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 30),
           child: Container(
@@ -122,7 +123,6 @@ class _HomePageState extends State<HomePage> {
                   }
                 }),
                 const SizedBox(height: 10),
-
                 _buildTextField(context, "Destination", Icons.flag, selectedDestination, () async {
                   final result = await Navigator.push(
                     context,
@@ -135,7 +135,6 @@ class _HomePageState extends State<HomePage> {
                   }
                 }),
                 const SizedBox(height: 10),
-
                 _buildTextField(context, "Date", Icons.calendar_month, selectedDate, () async {
                   final result = await Navigator.push(
                     context,
@@ -146,7 +145,6 @@ class _HomePageState extends State<HomePage> {
                   }
                 }),
                 const SizedBox(height: 20),
-
                 ElevatedButton(
                   onPressed: () {
                     if (selectedOrigin != null &&
@@ -211,19 +209,6 @@ class _HomePageState extends State<HomePage> {
   }
 
   Widget _buildProfilePage() {
-    return Center(
-      child: ElevatedButton.icon(
-        icon: const Icon(Icons.logout),
-        label: const Text("Logout"),
-        onPressed: () async {
-          await FirebaseAuth.instance.signOut();
-          Navigator.of(context).pushReplacementNamed('/login');
-        },
-        style: ElevatedButton.styleFrom(
-          backgroundColor: Colors.red,
-          foregroundColor: Colors.white,
-        ),
-      ),
-    );
+    return const ProfilePage();
   }
 }

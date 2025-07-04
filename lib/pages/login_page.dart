@@ -1,9 +1,11 @@
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'homepage.dart';
 import 'register_page.dart';
 
 class LoginPage extends StatefulWidget {
   const LoginPage({super.key});
+
   @override
   State<LoginPage> createState() => _LoginPageState();
 }
@@ -14,8 +16,13 @@ class _LoginPageState extends State<LoginPage> {
   bool isChecked = false;
   bool isLoading = false;
 
+  get stackTrace => null;
+
   void _login() async {
-    if (emailController.text.trim().isEmpty || passwordController.text.trim().isEmpty) {
+    final email = emailController.text.trim();
+    final password = passwordController.text.trim();
+
+    if (email.isEmpty || password.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text("Email and password must not be empty")),
       );
@@ -25,20 +32,50 @@ class _LoginPageState extends State<LoginPage> {
     setState(() => isLoading = true);
 
     try {
-      await FirebaseAuth.instance.signInWithEmailAndPassword(
-        email: emailController.text.trim(),
-        password: passwordController.text.trim(),
-      );
+      final userCredential = await FirebaseAuth.instance
+          .signInWithEmailAndPassword(email: email, password: password);
 
-      // ✅ Firebase authStateChanges will automatically handle navigation
+      print("✅ Logged in as: ${userCredential.user?.email}");
+
+      Navigator.pushAndRemoveUntil(
+        context,
+        MaterialPageRoute(builder: (_) => const HomePage()),
+
+        (Route<dynamic> route) => false,
+      );
     } on FirebaseAuthException catch (e) {
+      String errorMessage;
+      switch (e.code) {
+        case 'user-not-found':
+          errorMessage = "No user found with this email.";
+          break;
+        case 'wrong-password':
+          errorMessage = "Incorrect password.";
+          break;
+        case 'invalid-email':
+          errorMessage = "Invalid email format.";
+          break;
+        default:
+          errorMessage = "Login failed: ${e.message}";
+      }
+
+      print("❌ FirebaseAuthException: ${e.code} - ${e.message}");
+
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(e.message ?? "Login failed")),
+        SnackBar(content: Text(errorMessage)),
+      );
+    } catch (e, stack) {
+      print("❌ Unexpected error: $e");
+      print("📌 Stack trace:\n$stack");
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("An unexpected error occurred.")),
       );
     } finally {
       setState(() => isLoading = false);
     }
   }
+
 
   @override
   Widget build(BuildContext context) {
@@ -102,9 +139,7 @@ class _LoginPageState extends State<LoginPage> {
                 ],
               ),
               TextButton(
-                onPressed: () {
-                  // Implement reset password later
-                },
+                onPressed: () {},
                 child: const Text(
                   "Forgot password?",
                   style: TextStyle(color: Colors.red),
