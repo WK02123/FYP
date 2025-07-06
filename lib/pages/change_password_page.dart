@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 
 class ChangePasswordPage extends StatefulWidget {
   const ChangePasswordPage({super.key});
@@ -28,16 +29,22 @@ class _ChangePasswordPageState extends State<ChangePasswordPage> {
     }
 
     try {
-      // Re-authenticate
       final email = user?.email;
       if (email == null) throw Exception("User email not found.");
 
       final credential = EmailAuthProvider.credential(email: email, password: currentPassword);
       await user!.reauthenticateWithCredential(credential);
 
-      // Change password
+      // Change password in Firebase Auth
       await user.updatePassword(newPassword);
 
+      // Update password in Firestore (❗not secure, only for testing/demo)
+      await FirebaseFirestore.instance
+          .collection('users')
+          .doc(user.uid)
+          .update({'password': newPassword});
+
+      // Show success dialog
       showDialog(
         context: context,
         builder: (_) => AlertDialog(
@@ -51,6 +58,12 @@ class _ChangePasswordPageState extends State<ChangePasswordPage> {
           ),
         ),
       );
+
+      Future.delayed(const Duration(seconds: 2), () {
+        Navigator.of(context).pop(); // close dialog
+        Navigator.of(context).pop(); // back to profile page
+      });
+
     } on FirebaseAuthException catch (e) {
       if (e.code == 'wrong-password') {
         _showSnack("Incorrect current password.");

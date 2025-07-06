@@ -1,7 +1,10 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+
 import 'login_page.dart';
+import 'TOC.dart';
+import 'PrivacyPolicy.dart';
 
 class RegisterPage extends StatefulWidget {
   const RegisterPage({super.key});
@@ -17,6 +20,7 @@ class _RegisterPageState extends State<RegisterPage> {
   final passwordController = TextEditingController();
 
   bool isLoading = false;
+  bool agreed = false;
 
   Future<void> _register() async {
     final name = nameController.text.trim();
@@ -29,17 +33,19 @@ class _RegisterPageState extends State<RegisterPage> {
       return;
     }
 
+    if (!agreed) {
+      _showMessage("Please agree to the Terms & Conditions and Privacy Policy");
+      return;
+    }
+
     try {
       setState(() => isLoading = true);
 
-      // Register user
       final userCredential = await FirebaseAuth.instance
           .createUserWithEmailAndPassword(email: email, password: password);
 
-      // Send email verification
       await userCredential.user!.sendEmailVerification();
 
-      // Save user to Firestore
       await FirebaseFirestore.instance
           .collection('users')
           .doc(userCredential.user!.uid)
@@ -52,12 +58,12 @@ class _RegisterPageState extends State<RegisterPage> {
       });
 
       _showMessage("Verification email sent. Please check your inbox.");
-
-      // Sign out after sending email
       await FirebaseAuth.instance.signOut();
 
       Navigator.pushReplacement(
-          context, MaterialPageRoute(builder: (_) => const LoginPage()));
+        context,
+        MaterialPageRoute(builder: (_) => const LoginPage()),
+      );
     } on FirebaseAuthException catch (e) {
       _showMessage(e.message ?? "Registration failed");
     } finally {
@@ -95,13 +101,21 @@ class _RegisterPageState extends State<RegisterPage> {
       backgroundColor: Colors.white,
       body: ListView(
         children: [
-          const SizedBox(height: 40),
-          IconButton(
-            icon: const Icon(Icons.arrow_back),
-            onPressed: () {
-              Navigator.pushReplacement(
-                  context, MaterialPageRoute(builder: (_) => const LoginPage()));
-            },
+          const SizedBox(height: 20),
+          Padding(
+            padding: const EdgeInsets.only(left: 10),
+            child: Align(
+              alignment: Alignment.topLeft,
+              child: IconButton(
+                icon: const Icon(Icons.arrow_back),
+                onPressed: () {
+                  Navigator.pushReplacement(
+                    context,
+                    MaterialPageRoute(builder: (_) => const LoginPage()),
+                  );
+                },
+              ),
+            ),
           ),
           Container(
             height: 200,
@@ -130,6 +144,58 @@ class _RegisterPageState extends State<RegisterPage> {
           _buildTextField("Email", emailController),
           _buildTextField("Phone Number", phoneController),
           _buildTextField("Password", passwordController, isPassword: true),
+
+          // Terms & Conditions and Privacy Policy Checkbox Row
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 30, vertical: 10),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Checkbox(
+                  value: agreed,
+                  onChanged: (value) {
+                    setState(() {
+                      agreed = value ?? false;
+                    });
+                  },
+                ),
+                Expanded(
+                  child: Wrap(
+                    children: [
+                      const Text("I agree to the "),
+                      GestureDetector(
+                        onTap: () {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(builder: (_) => const TermsPage()),
+                          );
+                        },
+                        child: const Text(
+                          "Terms & Conditions",
+                          style: TextStyle(color: Colors.blue),
+                        ),
+                      ),
+                      const Text(" and "),
+                      GestureDetector(
+                        onTap: () {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(builder: (_) => const PrivacyPage()),
+                          );
+                        },
+                        child: const Text(
+                          "Privacy Policy",
+                          style: TextStyle(color: Colors.blue),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+          // Register Button
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 30, vertical: 20),
             child: isLoading
@@ -142,8 +208,7 @@ class _RegisterPageState extends State<RegisterPage> {
                     borderRadius: BorderRadius.circular(20)),
                 minimumSize: const Size.fromHeight(50),
               ),
-              child:
-              const Text("Register", style: TextStyle(fontSize: 16)),
+              child: const Text("Register", style: TextStyle(fontSize: 16)),
             ),
           ),
         ],

@@ -63,24 +63,7 @@ class AdminPage extends StatelessWidget {
                 );
               },
             ),
-            _buildTile(
-              context,
-              title: "Usage Stats",
-              icon: Icons.bar_chart,
-              color: Colors.orange,
-              onTap: () {
-                // Navigate to statistics page
-              },
-            ),
-            _buildTile(
-              context,
-              title: "Edit Schedules",
-              icon: Icons.schedule,
-              color: Colors.purple,
-              onTap: () {
-                // Navigate to schedule management
-              },
-            ),
+
           ],
         ),
       ),
