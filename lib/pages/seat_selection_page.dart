@@ -1,5 +1,4 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'booking_confirmation_page.dart';
 
@@ -45,6 +44,7 @@ class _SeatSelectionPageState extends State<SeatSelectionPage> {
     final snapshot = await FirebaseFirestore.instance
         .collection('booked_seats')
         .where('scheduleId', isEqualTo: widget.scheduleId)
+        .where('date', isEqualTo: widget.date)
         .get();
 
     final seats = snapshot.docs.map((doc) => doc['seatNumber'] as String).toList();
@@ -59,6 +59,7 @@ class _SeatSelectionPageState extends State<SeatSelectionPage> {
       backgroundColor: Colors.white,
       body: Column(
         children: [
+          // Top App Bar
           Container(
             width: double.infinity,
             height: 100,
@@ -90,6 +91,8 @@ class _SeatSelectionPageState extends State<SeatSelectionPage> {
           const SizedBox(height: 10),
           const Text('Driver Cabin', style: TextStyle(color: Colors.grey)),
           const Divider(),
+
+          // Seat Grid
           Expanded(
             child: Center(
               child: Container(
@@ -155,6 +158,8 @@ class _SeatSelectionPageState extends State<SeatSelectionPage> {
               ),
             ),
           ),
+
+          // Bottom Booking Bar
           if (selectedSeats.isNotEmpty)
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 15),
@@ -169,7 +174,7 @@ class _SeatSelectionPageState extends State<SeatSelectionPage> {
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
                   Text(
-                    'Seat(s): ${selectedSeats.join(', ')}',
+                    'Selected: ${selectedSeats.join(', ')}',
                     style: const TextStyle(color: Colors.white, fontSize: 16),
                   ),
                   ElevatedButton(

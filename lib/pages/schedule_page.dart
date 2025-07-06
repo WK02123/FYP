@@ -8,11 +8,11 @@ class SchedulePage extends StatelessWidget {
   final String date;
 
   const SchedulePage({
-    super.key,
+    Key? key,
     required this.origin,
     required this.destination,
     required this.date,
-  });
+  }) : super(key: key);
 
   @override
   Widget build(BuildContext context) {
@@ -58,7 +58,7 @@ class SchedulePage extends StatelessWidget {
           ),
           const SizedBox(height: 20),
 
-          // 🚌 Bus Times
+          // 🚌 Bus Times List
           Expanded(
             child: ListView.builder(
               padding: const EdgeInsets.all(10),
@@ -71,6 +71,7 @@ class SchedulePage extends StatelessWidget {
                   future: FirebaseFirestore.instance
                       .collection('booked_seats')
                       .where('scheduleId', isEqualTo: scheduleId)
+                      .where('date', isEqualTo: date) // ✅ filter by selected date
                       .get(),
                   builder: (context, snapshot) {
                     int bookedCount = 0;

@@ -31,20 +31,33 @@ class _RegisterPageState extends State<RegisterPage> {
 
     try {
       setState(() => isLoading = true);
-      final userCredential = await FirebaseAuth.instance.createUserWithEmailAndPassword(
-        email: email,
-        password: password,
-      );
 
-      await FirebaseFirestore.instance.collection('users').doc(userCredential.user!.uid).set({
+      // Register user
+      final userCredential = await FirebaseAuth.instance
+          .createUserWithEmailAndPassword(email: email, password: password);
+
+      // Send email verification
+      await userCredential.user!.sendEmailVerification();
+
+      // Save user to Firestore
+      await FirebaseFirestore.instance
+          .collection('users')
+          .doc(userCredential.user!.uid)
+          .set({
         'name': name,
         'email': email,
         'phone': phone,
         'createdAt': FieldValue.serverTimestamp(),
+        'disabled': false,
       });
 
-      _showMessage("Registration successful. Please login.");
-      Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const LoginPage()));
+      _showMessage("Verification email sent. Please check your inbox.");
+
+      // Sign out after sending email
+      await FirebaseAuth.instance.signOut();
+
+      Navigator.pushReplacement(
+          context, MaterialPageRoute(builder: (_) => const LoginPage()));
     } on FirebaseAuthException catch (e) {
       _showMessage(e.message ?? "Registration failed");
     } finally {
@@ -56,7 +69,8 @@ class _RegisterPageState extends State<RegisterPage> {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
   }
 
-  Widget _buildTextField(String label, TextEditingController controller, {bool isPassword = false}) {
+  Widget _buildTextField(String label, TextEditingController controller,
+      {bool isPassword = false}) {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 30, vertical: 10),
       child: TextField(
@@ -85,7 +99,8 @@ class _RegisterPageState extends State<RegisterPage> {
           IconButton(
             icon: const Icon(Icons.arrow_back),
             onPressed: () {
-              Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const LoginPage()));
+              Navigator.pushReplacement(
+                  context, MaterialPageRoute(builder: (_) => const LoginPage()));
             },
           ),
           Container(
@@ -100,8 +115,13 @@ class _RegisterPageState extends State<RegisterPage> {
                 children: [
                   Icon(Icons.directions_bus, color: Colors.white, size: 50),
                   SizedBox(height: 10),
-                  Text('Ridemate', style: TextStyle(color: Colors.white, fontSize: 26, fontWeight: FontWeight.bold)),
-                  Text('Sign Up', style: TextStyle(color: Colors.white70, fontSize: 18)),
+                  Text('Ridemate',
+                      style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 26,
+                          fontWeight: FontWeight.bold)),
+                  Text('Sign Up',
+                      style: TextStyle(color: Colors.white70, fontSize: 18)),
                 ],
               ),
             ),
@@ -118,10 +138,12 @@ class _RegisterPageState extends State<RegisterPage> {
               onPressed: _register,
               style: ElevatedButton.styleFrom(
                 backgroundColor: Colors.red,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(20)),
                 minimumSize: const Size.fromHeight(50),
               ),
-              child: const Text("Register", style: TextStyle(fontSize: 16)),
+              child:
+              const Text("Register", style: TextStyle(fontSize: 16)),
             ),
           ),
         ],

@@ -3,6 +3,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'edit_profile_page.dart';
 import 'change_password_page.dart';
+import 'login_page.dart'; // ✅ Make sure this is imported
 
 class ProfilePage extends StatelessWidget {
   const ProfilePage({super.key});
@@ -112,7 +113,11 @@ class ProfilePage extends StatelessWidget {
                 child: ElevatedButton(
                   onPressed: () async {
                     await FirebaseAuth.instance.signOut();
-                    Navigator.pushReplacementNamed(context, '/login');
+                    Navigator.pushAndRemoveUntil(
+                      context,
+                      MaterialPageRoute(builder: (_) => const LoginPage()),
+                          (route) => false,
+                    );
                   },
                   style: ElevatedButton.styleFrom(
                     backgroundColor: Colors.red.shade100,

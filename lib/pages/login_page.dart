@@ -1,7 +1,10 @@
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'homepage.dart';
 import 'register_page.dart';
+import 'reset_password_page.dart';
+import 'admin_page.dart';
 
 class LoginPage extends StatefulWidget {
   const LoginPage({super.key});
@@ -15,8 +18,6 @@ class _LoginPageState extends State<LoginPage> {
   final passwordController = TextEditingController();
   bool isChecked = false;
   bool isLoading = false;
-
-  get stackTrace => null;
 
   void _login() async {
     final email = emailController.text.trim();
@@ -34,15 +35,50 @@ class _LoginPageState extends State<LoginPage> {
     try {
       final userCredential = await FirebaseAuth.instance
           .signInWithEmailAndPassword(email: email, password: password);
+      final user = userCredential.user;
 
-      print("✅ Logged in as: ${userCredential.user?.email}");
+      // Check if user is disabled in Firestore
+      final userDoc = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(user?.uid)
+          .get();
 
-      Navigator.pushAndRemoveUntil(
-        context,
-        MaterialPageRoute(builder: (_) => const HomePage()),
+      if (userDoc.exists && userDoc.data()?['disabled'] == true) {
+        await FirebaseAuth.instance.signOut();
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text("Your account has been disabled by the admin."),
+          ),
+        );
+        setState(() => isLoading = false);
+        return;
+      }
 
-        (Route<dynamic> route) => false,
-      );
+      // ✅ Admin bypasses email verification
+      if (user != null && user.email != 'admin@gmail.com' && !user.emailVerified) {
+        await FirebaseAuth.instance.signOut();
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text("Please verify your email before logging in."),
+          ),
+        );
+        setState(() => isLoading = false);
+        return;
+      }
+
+      if (user?.email == 'admin@gmail.com') {
+        Navigator.pushAndRemoveUntil(
+          context,
+          MaterialPageRoute(builder: (_) => const AdminPage()),
+              (Route<dynamic> route) => false,
+        );
+      } else {
+        Navigator.pushAndRemoveUntil(
+          context,
+          MaterialPageRoute(builder: (_) => const HomePage()),
+              (Route<dynamic> route) => false,
+        );
+      }
     } on FirebaseAuthException catch (e) {
       String errorMessage;
       switch (e.code) {
@@ -60,14 +96,11 @@ class _LoginPageState extends State<LoginPage> {
       }
 
       print("❌ FirebaseAuthException: ${e.code} - ${e.message}");
-
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(errorMessage)),
       );
-    } catch (e, stack) {
+    } catch (e) {
       print("❌ Unexpected error: $e");
-      print("📌 Stack trace:\n$stack");
-
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text("An unexpected error occurred.")),
       );
@@ -75,7 +108,6 @@ class _LoginPageState extends State<LoginPage> {
       setState(() => isLoading = false);
     }
   }
-
 
   @override
   Widget build(BuildContext context) {
@@ -132,14 +164,16 @@ class _LoginPageState extends State<LoginPage> {
                     onChanged: (value) =>
                         setState(() => isChecked = value ?? false),
                   ),
-                  const Text(
-                    "Remember me",
-                    style: TextStyle(fontSize: 12),
-                  ),
+                  const Text("Remember me", style: TextStyle(fontSize: 12)),
                 ],
               ),
               TextButton(
-                onPressed: () {},
+                onPressed: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (_) => const ResetPasswordPage()),
+                  );
+                },
                 child: const Text(
                   "Forgot password?",
                   style: TextStyle(color: Colors.red),

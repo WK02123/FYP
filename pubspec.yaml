@@ -36,6 +36,7 @@ dependencies:
   cloud_firestore: ^4.15.8
   intl: ^0.18.1
   table_calendar: ^3.0.8
+  http: ^0.13.6
 
 
 

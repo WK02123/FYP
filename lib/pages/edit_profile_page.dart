@@ -14,7 +14,7 @@ class _EditProfilePageState extends State<EditProfilePage> {
   final _firestore = FirebaseFirestore.instance;
   final _nameController = TextEditingController();
   final _contactController = TextEditingController();
-  late String email;
+  final _emailController = TextEditingController();
   bool isLoading = true;
 
   @override
@@ -26,7 +26,7 @@ class _EditProfilePageState extends State<EditProfilePage> {
   Future<void> _loadProfile() async {
     final user = _auth.currentUser;
     if (user != null) {
-      email = user.email ?? '';
+      _emailController.text = user.email ?? '';
       final doc = await _firestore.collection('users').doc(user.uid).get();
       if (doc.exists) {
         final data = doc.data()!;
@@ -82,7 +82,7 @@ class _EditProfilePageState extends State<EditProfilePage> {
         padding: const EdgeInsets.all(20),
         child: Column(
           children: [
-            _buildField("Email", initialValue: email, readOnly: true),
+            _buildField("Email", controller: _emailController, readOnly: true),
             _buildField("Full Name", controller: _nameController),
             _buildField("Contact", controller: _contactController),
             const SizedBox(height: 20),
@@ -102,12 +102,11 @@ class _EditProfilePageState extends State<EditProfilePage> {
   }
 
   Widget _buildField(String label,
-      {TextEditingController? controller, String? initialValue, bool readOnly = false}) {
+      {required TextEditingController controller, bool readOnly = false}) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 15),
       child: TextFormField(
         controller: controller,
-        initialValue: initialValue,
         readOnly: readOnly,
         decoration: InputDecoration(
           labelText: label,
