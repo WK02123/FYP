@@ -4,7 +4,8 @@ import 'package:shuttle_bus_app/pages/date_picker_page.dart';
 import 'package:shuttle_bus_app/pages/location_search_page.dart';
 import 'package:shuttle_bus_app/pages/schedule_page.dart';
 import 'package:shuttle_bus_app/pages/profile_page.dart';
-import 'login_page.dart'; // <-- redirect here after logout
+import 'package:shuttle_bus_app/pages/gps_map_page.dart'; // <-- add this
+import 'login_page.dart';
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -43,7 +44,7 @@ class _HomePageState extends State<HomePage> {
       body: _selectedIndex == 0
           ? _buildMainContent()
           : _selectedIndex == 1
-          ? const Placeholder()
+          ? const GpsMapPage()        // <-- middle tab = GPS
           : _buildProfilePage(),
       bottomNavigationBar: BottomNavigationBar(
         currentIndex: _selectedIndex,
@@ -51,13 +52,11 @@ class _HomePageState extends State<HomePage> {
         unselectedItemColor: Colors.grey,
         iconSize: 30,
         onTap: (index) {
-          setState(() {
-            _selectedIndex = index;
-          });
+          setState(() => _selectedIndex = index);
         },
         items: const [
           BottomNavigationBarItem(icon: Icon(Icons.home), label: ''),
-          BottomNavigationBarItem(icon: Icon(Icons.schedule), label: ''),
+          BottomNavigationBarItem(icon: Icon(Icons.my_location), label: ''), // GPS
           BottomNavigationBarItem(icon: Icon(Icons.person), label: ''),
         ],
       ),
@@ -118,9 +117,7 @@ class _HomePageState extends State<HomePage> {
                       builder: (_) => const LocationSearchPage(title: 'Search Origin'),
                     ),
                   );
-                  if (result != null) {
-                    setState(() => selectedOrigin = result);
-                  }
+                  if (result != null) setState(() => selectedOrigin = result);
                 }),
                 const SizedBox(height: 10),
                 _buildTextField(context, "Destination", Icons.flag, selectedDestination, () async {
@@ -130,9 +127,7 @@ class _HomePageState extends State<HomePage> {
                       builder: (_) => const LocationSearchPage(title: 'Search Destination'),
                     ),
                   );
-                  if (result != null) {
-                    setState(() => selectedDestination = result);
-                  }
+                  if (result != null) setState(() => selectedDestination = result);
                 }),
                 const SizedBox(height: 10),
                 _buildTextField(context, "Date", Icons.calendar_month, selectedDate, () async {
@@ -140,9 +135,7 @@ class _HomePageState extends State<HomePage> {
                     context,
                     MaterialPageRoute(builder: (_) => const DatePickerPage()),
                   );
-                  if (result != null) {
-                    setState(() => selectedDate = result);
-                  }
+                  if (result != null) setState(() => selectedDate = result);
                 }),
                 const SizedBox(height: 20),
                 ElevatedButton(
@@ -208,7 +201,5 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  Widget _buildProfilePage() {
-    return const ProfilePage();
-  }
+  Widget _buildProfilePage() => const ProfilePage();
 }

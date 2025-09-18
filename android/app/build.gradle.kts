@@ -21,7 +21,7 @@ android {
 
     defaultConfig {
         applicationId = "inti.edu.shuttle_bus_app" // ✅ Must match Firebase package
-        minSdk = flutter.minSdkVersion
+        minSdk = 21                                // <- FIXED (remove Groovy style)
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
@@ -29,6 +29,7 @@ android {
 
     buildTypes {
         release {
+            // TODO: replace with release signingConfig when you have one
             signingConfig = signingConfigs.getByName("debug")
         }
     }
