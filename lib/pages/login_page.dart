@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+
 import 'homepage.dart';
 import 'register_page.dart';
 import 'reset_password_page.dart';
 import 'admin_page.dart';
+import 'driver_home_page.dart'; // 👈 driver dashboard entry
 
 class LoginPage extends StatefulWidget {
   const LoginPage({super.key});
@@ -19,94 +21,105 @@ class _LoginPageState extends State<LoginPage> {
   bool isChecked = false;
   bool isLoading = false;
 
-  void _login() async {
+  Future<void> _login() async {
     final email = emailController.text.trim();
     final password = passwordController.text.trim();
 
     if (email.isEmpty || password.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Email and password must not be empty")),
-      );
+      _toast("Email and password must not be empty");
       return;
     }
 
     setState(() => isLoading = true);
 
     try {
-      final userCredential = await FirebaseAuth.instance
+      final cred = await FirebaseAuth.instance
           .signInWithEmailAndPassword(email: email, password: password);
-      final user = userCredential.user;
 
-      // Check if user is disabled in Firestore
-      final userDoc = await FirebaseFirestore.instance
-          .collection('users')
-          .doc(user?.uid)
-          .get();
-
-      if (userDoc.exists && userDoc.data()?['disabled'] == true) {
-        await FirebaseAuth.instance.signOut();
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text("Your account has been disabled by the admin."),
-          ),
-        );
+      final user = cred.user;
+      if (user == null) {
+        _toast("Login failed.");
         setState(() => isLoading = false);
         return;
       }
 
-      // ✅ Admin bypasses email verification
-      if (user != null && user.email != 'admin@gmail.com' && !user.emailVerified) {
+      // 1) Optional: block disabled accounts (checks users/ and drivers/)
+      final usersDoc =
+      await FirebaseFirestore.instance.collection('users').doc(user.uid).get();
+      final driversDoc =
+      await FirebaseFirestore.instance.collection('drivers').doc(user.uid).get();
+
+      final isDisabled =
+          (usersDoc.data()?['disabled'] == true) || (driversDoc.data()?['disabled'] == true);
+
+      if (isDisabled) {
         await FirebaseAuth.instance.signOut();
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text("Please verify your email before logging in."),
-          ),
-        );
+        _toast("Your account has been disabled by the admin.");
         setState(() => isLoading = false);
         return;
       }
 
-      if (user?.email == 'admin@gmail.com') {
-        Navigator.pushAndRemoveUntil(
-          context,
-          MaterialPageRoute(builder: (_) => const AdminPage()),
-              (Route<dynamic> route) => false,
-        );
+      // 2) Admin bypasses verification
+      final isAdmin = user.email?.toLowerCase() == 'admin@gmail.com';
+      if (!isAdmin && !user.emailVerified) {
+        await FirebaseAuth.instance.signOut();
+        _toast("Please verify your email before logging in.");
+        setState(() => isLoading = false);
+        return;
+      }
+
+      // 3) Resolve role (users/{uid}.role or drivers/{uid}.role; fallback student)
+      String role = 'student';
+      if (usersDoc.exists) {
+        role = (usersDoc.data()?['role'] as String?)?.toLowerCase() ?? 'student';
+      } else if (driversDoc.exists) {
+        role = (driversDoc.data()?['role'] as String?)?.toLowerCase() ?? 'driver';
+      }
+
+      // 4) Navigate by role (admin wins first)
+      if (isAdmin) {
+        _go(const AdminPage());
+      } else if (role == 'driver') {
+        _go(const DriverHomePage());
       } else {
-        Navigator.pushAndRemoveUntil(
-          context,
-          MaterialPageRoute(builder: (_) => const HomePage()),
-              (Route<dynamic> route) => false,
-        );
+        _go(const HomePage());
       }
     } on FirebaseAuthException catch (e) {
-      String errorMessage;
+      String msg;
       switch (e.code) {
         case 'user-not-found':
-          errorMessage = "No user found with this email.";
+          msg = "No user found with this email.";
           break;
         case 'wrong-password':
-          errorMessage = "Incorrect password.";
+          msg = "Incorrect password.";
           break;
         case 'invalid-email':
-          errorMessage = "Invalid email format.";
+          msg = "Invalid email format.";
+          break;
+        case 'user-disabled':
+          msg = "This account has been disabled.";
           break;
         default:
-          errorMessage = "Login failed: ${e.message}";
+          msg = "Login failed: ${e.message}";
       }
-
-      print("❌ FirebaseAuthException: ${e.code} - ${e.message}");
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(errorMessage)),
-      );
+      _toast(msg);
     } catch (e) {
-      print("❌ Unexpected error: $e");
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("An unexpected error occurred.")),
-      );
+      _toast("An unexpected error occurred.");
     } finally {
-      setState(() => isLoading = false);
+      if (mounted) setState(() => isLoading = false);
     }
+  }
+
+  void _go(Widget page) {
+    Navigator.pushAndRemoveUntil(
+      context,
+      MaterialPageRoute(builder: (_) => page),
+          (route) => false,
+    );
+  }
+
+  void _toast(String m) {
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(m)));
   }
 
   @override

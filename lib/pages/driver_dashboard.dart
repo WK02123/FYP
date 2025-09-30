@@ -1,0 +1,213 @@
+import 'package:flutter/material.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'driver_service.dart';
+import 'login_page.dart'; // 👈 redirect after logout
+
+class DriverDashboard extends StatelessWidget {
+  const DriverDashboard({super.key});
+
+  void _logout(BuildContext context) async {
+    await FirebaseAuth.instance.signOut();
+    Navigator.pushAndRemoveUntil(
+      context,
+      MaterialPageRoute(builder: (_) => const LoginPage()),
+          (route) => false,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final svc = DriverService.instance;
+
+    return Scaffold(
+      backgroundColor: Colors.white,
+      appBar: AppBar(
+        backgroundColor: const Color(0xFFD32F2F),
+        title: const Text("Ridemate"),
+        centerTitle: true,
+        foregroundColor: Colors.white,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.logout, color: Colors.white),
+            tooltip: 'Sign out',
+            onPressed: () => _logout(context),
+          ),
+        ],
+      ),
+      body: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          children: [
+            StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+              stream: svc.driverStream(),
+              builder: (context, snap) {
+                final data = snap.data?.data() ?? {};
+                final name = data['name']?.toString() ?? 'Driver';
+                final status = data['status']?.toString() ?? 'offline';
+                return Card(
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16)),
+                  child: ListTile(
+                    leading:
+                    const Icon(Icons.person, size: 40, color: Colors.red),
+                    title: Text(name),
+                    subtitle: Text('Bus: ${data['busCode'] ?? '-'}'),
+                    trailing: Text(
+                      status == 'online' ? 'Online' : 'Offline',
+                      style: TextStyle(
+                        color:
+                        status == 'online' ? Colors.green : Colors.grey,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                );
+              },
+            ),
+            const SizedBox(height: 16),
+
+            // Report Issue row
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Text("Report Issue",
+                  style: Theme.of(context).textTheme.titleMedium),
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 14,
+              runSpacing: 10,
+              children: const [
+                _IssueChip(label: 'Accident', icon: Icons.car_crash),
+                _IssueChip(label: 'Delay', icon: Icons.schedule),
+                _IssueChip(label: 'Mechanical', icon: Icons.build),
+                _IssueChip(label: 'Emergency', icon: Icons.warning_amber),
+              ],
+            ),
+            const SizedBox(height: 20),
+
+            // Today next trip
+            Expanded(
+              child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+                stream: svc.todayTrips(),
+                builder: (context, snap) {
+                  final docs = snap.data?.docs ?? [];
+                  if (docs.isEmpty) {
+                    return const _EmptyCard(
+                        text: "No trips scheduled for today");
+                  }
+                  final next = docs.first.data();
+                  return Card(
+                    elevation: 2,
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(16)),
+                    child: ListTile(
+                      title: Text(
+                          '${next['time']}  —  ${next['origin']} → ${next['destination']}'),
+                      subtitle: const Text('Schedule on time'),
+                      trailing: const Icon(Icons.qr_code, size: 36),
+                      onTap: () {
+                        // TODO: open QR Scanner if needed
+                      },
+                    ),
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _IssueChip extends StatelessWidget {
+  final String label;
+  final IconData icon;
+  const _IssueChip({required this.label, required this.icon});
+
+  @override
+  Widget build(BuildContext context) {
+    return ActionChip(
+      avatar: Icon(icon, color: Colors.red),
+      label: Text(label),
+      onPressed: () async {
+        final note = await showDialog<String>(
+          context: context,
+          builder: (_) => _IssueDialog(type: label),
+        );
+        if (note == null) return;
+        await DriverService.instance.reportIssue(type: label, note: note);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('$label reported')),
+        );
+      },
+      shape: StadiumBorder(side: BorderSide(color: Colors.red.shade100)),
+    );
+  }
+}
+
+class _IssueDialog extends StatefulWidget {
+  final String type;
+  const _IssueDialog({required this.type});
+
+  @override
+  State<_IssueDialog> createState() => _IssueDialogState();
+}
+
+class _IssueDialogState extends State<_IssueDialog> {
+  final _c = TextEditingController();
+  bool _sending = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Text('Report ${widget.type}'),
+      content: TextField(
+        controller: _c,
+        maxLines: 4,
+        decoration: const InputDecoration(
+          hintText: 'Add a note (optional)',
+          border: OutlineInputBorder(),
+        ),
+      ),
+      actions: [
+        TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel')),
+        ElevatedButton(
+          onPressed: _sending
+              ? null
+              : () async {
+            setState(() => _sending = true);
+            Navigator.pop(context, _c.text.trim());
+          },
+          style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+          child: _sending
+              ? const SizedBox(
+              height: 16,
+              width: 16,
+              child: CircularProgressIndicator(
+                  strokeWidth: 2, color: Colors.white))
+              : const Text('Send'),
+        )
+      ],
+    );
+  }
+}
+
+class _EmptyCard extends StatelessWidget {
+  final String text;
+  const _EmptyCard({required this.text});
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      child: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24.0),
+            child: Text(text, style: const TextStyle(color: Colors.grey)),
+          )),
+    );
+  }
+}

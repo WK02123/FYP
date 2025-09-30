@@ -4,6 +4,8 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'login_page.dart';
 import 'manage_bookings_page.dart';
 import 'manage_users_page.dart';
+import 'create_driver_page.dart';
+import 'reset_driver_password_page.dart';
 
 class AdminPage extends StatelessWidget {
   const AdminPage({super.key});
@@ -21,13 +23,17 @@ class AdminPage extends StatelessWidget {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text("Admin Dashboard"),
         backgroundColor: const Color(0xFFD32F2F),
+        title: const Text(
+          "Admin Dashboard",
+          style: TextStyle(fontWeight: FontWeight.bold),
+        ),
         foregroundColor: Colors.white,
+        elevation: 0,
         actions: [
           IconButton(
-            icon: const Icon(Icons.logout),
-            tooltip: 'Logout',
+            icon: const Icon(Icons.logout, color: Colors.white),
+            tooltip: 'Sign out',
             onPressed: () => _logout(context),
           ),
         ],
@@ -63,7 +69,30 @@ class AdminPage extends StatelessWidget {
                 );
               },
             ),
-
+            _buildTile(
+              context,
+              title: "Create Driver",
+              icon: Icons.person_add,
+              color: Colors.deepOrange,
+              onTap: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => const CreateDriverPage()),
+                );
+              },
+            ),
+            _buildTile(
+              context,
+              title: "Reset Driver Password",
+              icon: Icons.lock_reset,
+              color: Colors.purple,
+              onTap: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => const ResetDriverPasswordPage()),
+                );
+              },
+            ),
           ],
         ),
       ),
