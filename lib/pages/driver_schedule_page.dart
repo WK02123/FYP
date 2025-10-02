@@ -18,13 +18,36 @@ class DriverSchedulePage extends StatelessWidget {
       body: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
         stream: svc.todayTrips(),
         builder: (context, snap) {
+          // 🔹 Show error if query/index/rules fail
+          if (snap.hasError) {
+            return Center(
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Text(
+                  'Error loading trips:\n${snap.error}',
+                  style: const TextStyle(color: Colors.red),
+                  textAlign: TextAlign.center,
+                ),
+              ),
+            );
+          }
+
+          // 🔹 Loading indicator
           if (snap.connectionState == ConnectionState.waiting) {
             return const Center(child: CircularProgressIndicator());
           }
+
+          // 🔹 Show trips
           final trips = snap.data?.docs ?? [];
           if (trips.isEmpty) {
-            return const Center(child: Text('No trips today'));
+            return const Center(
+              child: Text(
+                'No trips today',
+                style: TextStyle(color: Colors.grey, fontSize: 16),
+              ),
+            );
           }
+
           return ListView.separated(
             padding: const EdgeInsets.all(12),
             itemCount: trips.length,
@@ -32,15 +55,25 @@ class DriverSchedulePage extends StatelessWidget {
             itemBuilder: (context, i) {
               final t = trips[i].data();
               return Card(
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16),
+                ),
                 child: ListTile(
                   leading: CircleAvatar(
                     backgroundColor: Colors.red.shade100,
                     child: const Icon(Icons.access_time, color: Colors.red),
                   ),
-                  title: Text('${t['time']}'),
-                  subtitle: Text('${t['origin']}  →  ${t['destination']}'),
-                  trailing: Text(t['status'] ?? 'scheduled'),
+                  title: Text(
+                    t['time']?.toString() ?? '--:--',
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  subtitle: Text(
+                    '${t['origin'] ?? '-'} → ${t['destination'] ?? '-'}',
+                  ),
+                  trailing: Text(
+                    t['status']?.toString() ?? 'scheduled',
+                    style: const TextStyle(fontSize: 12, color: Colors.grey),
+                  ),
                 ),
               );
             },

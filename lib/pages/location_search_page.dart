@@ -1,9 +1,17 @@
 import 'package:flutter/material.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 
 class LocationSearchPage extends StatefulWidget {
   final String title;
 
-  const LocationSearchPage({super.key, required this.title});
+  /// Optional: when searching destination, pass the chosen origin to filter results.
+  final String? originFilter;
+
+  const LocationSearchPage({
+    super.key,
+    required this.title,
+    this.originFilter,
+  });
 
   @override
   State<LocationSearchPage> createState() => _LocationSearchPageState();
@@ -11,32 +19,16 @@ class LocationSearchPage extends StatefulWidget {
 
 class _LocationSearchPageState extends State<LocationSearchPage> {
   final TextEditingController _searchController = TextEditingController();
+  String _query = '';
 
-  final List<String> allLocations = [
-    'Relau',
-    'Bukit Jambul',
-    'Sg. Nibong',
-    'Lip Sin',
-    'Sungai Ara',
-    'Greenlane',
-    'Elit Avenue',
-    'INTI Penang',
-  ];
-
-  List<String> filteredLocations = [];
+  bool get _isOriginMode =>
+      widget.title.toLowerCase().contains('origin'); // infer from title
 
   @override
   void initState() {
     super.initState();
-    filteredLocations = List.from(allLocations);
-
     _searchController.addListener(() {
-      final query = _searchController.text.toLowerCase();
-      setState(() {
-        filteredLocations = allLocations
-            .where((loc) => loc.toLowerCase().contains(query))
-            .toList();
-      });
+      setState(() => _query = _searchController.text.trim().toLowerCase());
     });
   }
 
@@ -44,6 +36,43 @@ class _LocationSearchPageState extends State<LocationSearchPage> {
   void dispose() {
     _searchController.dispose();
     super.dispose();
+  }
+
+  /// Build list of origins or destinations from routes collection.
+  /// routes doc.id is expected to be "Origin|Destination"
+  List<String> _buildItemsFromRoutes(QuerySnapshot snap) {
+    final set = <String>{};
+
+    for (final d in snap.docs) {
+      final id = d.id.trim();
+      final parts = id.split('|');
+      if (parts.length != 2) continue;
+
+      final origin = parts[0].trim();
+      final dest = parts[1].trim();
+
+      if (_isOriginMode) {
+        set.add(origin);
+      } else {
+        // Destination mode
+        if (widget.originFilter != null &&
+            widget.originFilter!.trim().isNotEmpty) {
+          // only destinations reachable from selected origin
+          if (origin.toLowerCase() ==
+              widget.originFilter!.trim().toLowerCase()) {
+            set.add(dest);
+          }
+        } else {
+          // list all unique destinations from all routes
+          set.add(dest);
+        }
+      }
+    }
+
+    // search filter (case-insensitive)
+    final list = set.where((s) => s.toLowerCase().contains(_query)).toList();
+    list.sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+    return list;
   }
 
   @override
@@ -111,15 +140,35 @@ class _LocationSearchPageState extends State<LocationSearchPage> {
             ),
           ),
 
+          // Live list from Firestore (routes)
           Expanded(
-            child: ListView.builder(
-              itemCount: filteredLocations.length,
-              itemBuilder: (context, index) {
-                return ListTile(
-                  leading: const Icon(Icons.location_on),
-                  title: Text(filteredLocations[index]),
-                  onTap: () {
-                    Navigator.pop(context, filteredLocations[index]);
+            child: StreamBuilder<QuerySnapshot>(
+              stream: FirebaseFirestore.instance
+                  .collection('routes')
+                  .snapshots(), // live updates
+              builder: (context, snapshot) {
+                if (snapshot.connectionState == ConnectionState.waiting) {
+                  return const Center(child: CircularProgressIndicator());
+                }
+                if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
+                  return const Center(child: Text('No routes found'));
+                }
+
+                final items = _buildItemsFromRoutes(snapshot.data!);
+                if (items.isEmpty) {
+                  return const Center(child: Text('No matching locations'));
+                }
+
+                return ListView.separated(
+                  itemCount: items.length,
+                  separatorBuilder: (_, __) => const Divider(height: 1),
+                  itemBuilder: (context, index) {
+                    final label = items[index];
+                    return ListTile(
+                      leading: const Icon(Icons.location_on),
+                      title: Text(label),
+                      onTap: () => Navigator.pop(context, label),
+                    );
                   },
                 );
               },

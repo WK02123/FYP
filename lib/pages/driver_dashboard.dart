@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'driver_scan_page.dart';
 import 'driver_service.dart';
 import 'login_page.dart'; // 👈 redirect after logout
 
@@ -33,6 +34,18 @@ class DriverDashboard extends StatelessWidget {
             tooltip: 'Sign out',
             onPressed: () => _logout(context),
           ),
+          // inside DriverDashboard's AppBar actions:
+          IconButton(
+            tooltip: 'Scan QR',
+            icon: const Icon(Icons.qr_code_scanner),
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const DriverScanPage()),
+              );
+            },
+          ),
+
         ],
       ),
       body: Padding(

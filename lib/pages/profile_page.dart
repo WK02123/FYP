@@ -1,9 +1,12 @@
+// profile_page.dart (replace your current file)
+
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'edit_profile_page.dart';
 import 'change_password_page.dart';
-import 'login_page.dart'; // ✅ Make sure this is imported
+import 'login_page.dart';
+import 'student_bookings_page.dart'; // <-- add this import
 
 class ProfilePage extends StatelessWidget {
   const ProfilePage({super.key});
@@ -58,6 +61,8 @@ class ProfilePage extends StatelessWidget {
                 ),
               ),
               const SizedBox(height: 20),
+
+              // Profile card
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 20),
                 child: GestureDetector(
@@ -70,9 +75,7 @@ class ProfilePage extends StatelessWidget {
                     decoration: BoxDecoration(
                       color: Colors.white,
                       borderRadius: BorderRadius.circular(15),
-                      boxShadow: const [
-                        BoxShadow(color: Colors.black12, blurRadius: 5),
-                      ],
+                      boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 5)],
                     ),
                     child: Row(
                       children: [
@@ -97,7 +100,23 @@ class ProfilePage extends StatelessWidget {
                   ),
                 ),
               ),
-              const SizedBox(height: 20),
+
+              const SizedBox(height: 12),
+
+              // My Bookings & QR
+              ListTile(
+                leading: const Icon(Icons.qr_code_2),
+                title: const Text("My Bookings & QR"),
+                trailing: const Icon(Icons.arrow_forward_ios, size: 16),
+                onTap: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (_) => const StudentsBookingsPage()),
+                  );
+                },
+              ),
+
+              // Change Password
               ListTile(
                 leading: const Icon(Icons.lock_outline),
                 title: const Text("Change Password"),
@@ -107,7 +126,9 @@ class ProfilePage extends StatelessWidget {
                   MaterialPageRoute(builder: (_) => const ChangePasswordPage()),
                 ),
               ),
+
               const Spacer(),
+
               Padding(
                 padding: const EdgeInsets.only(bottom: 20),
                 child: ElevatedButton(

@@ -1,3 +1,4 @@
+// lib/pages/admin_page.dart
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 
@@ -6,6 +7,7 @@ import 'manage_bookings_page.dart';
 import 'manage_users_page.dart';
 import 'create_driver_page.dart';
 import 'reset_driver_password_page.dart';
+import 'route_times_page.dart'; // 👈 NEW
 
 class AdminPage extends StatelessWidget {
   const AdminPage({super.key});
@@ -45,7 +47,7 @@ class AdminPage extends StatelessWidget {
           mainAxisSpacing: 20,
           crossAxisSpacing: 20,
           children: [
-            _buildTile(
+            _tile(
               context,
               title: "Shuttle Bookings",
               icon: Icons.directions_bus,
@@ -57,7 +59,7 @@ class AdminPage extends StatelessWidget {
                 );
               },
             ),
-            _buildTile(
+            _tile(
               context,
               title: "Manage Users",
               icon: Icons.group,
@@ -69,7 +71,7 @@ class AdminPage extends StatelessWidget {
                 );
               },
             ),
-            _buildTile(
+            _tile(
               context,
               title: "Create Driver",
               icon: Icons.person_add,
@@ -81,7 +83,7 @@ class AdminPage extends StatelessWidget {
                 );
               },
             ),
-            _buildTile(
+            _tile(
               context,
               title: "Reset Driver Password",
               icon: Icons.lock_reset,
@@ -89,7 +91,21 @@ class AdminPage extends StatelessWidget {
               onTap: () {
                 Navigator.push(
                   context,
-                  MaterialPageRoute(builder: (_) => const ResetDriverPasswordPage()),
+                  MaterialPageRoute(
+                      builder: (_) => const ResetDriverPasswordPage()),
+                );
+              },
+            ),
+            // 🌟 NEW TILE
+            _tile(
+              context,
+              title: "Route Times",
+              icon: Icons.schedule,
+              color: Colors.brown,
+              onTap: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => const RouteTimesPage()),
                 );
               },
             ),
@@ -99,7 +115,7 @@ class AdminPage extends StatelessWidget {
     );
   }
 
-  Widget _buildTile(
+  Widget _tile(
       BuildContext context, {
         required String title,
         required IconData icon,

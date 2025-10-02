@@ -1,10 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart'; // ✅ for route check
 import 'package:shuttle_bus_app/pages/date_picker_page.dart';
 import 'package:shuttle_bus_app/pages/location_search_page.dart';
 import 'package:shuttle_bus_app/pages/schedule_page.dart';
 import 'package:shuttle_bus_app/pages/profile_page.dart';
-import 'package:shuttle_bus_app/pages/gps_map_page.dart'; // <-- add this
+import 'package:shuttle_bus_app/pages/gps_map_page.dart';
 import 'login_page.dart';
 
 class HomePage extends StatefulWidget {
@@ -21,6 +22,42 @@ class _HomePageState extends State<HomePage> {
 
   int _selectedIndex = 0;
 
+  Future<void> _goScheduleIfRouteExists() async {
+    final origin = selectedOrigin;
+    final dest = selectedDestination;
+    final date = selectedDate;
+
+    if (origin == null || dest == null || date == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please select origin, destination, and date')),
+      );
+      return;
+    }
+
+    final routeKey = '${origin.trim()}|${dest.trim()}';
+    final doc = await FirebaseFirestore.instance.collection('routes').doc(routeKey).get();
+
+    if (!doc.exists) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('No route found for "$routeKey". Please pick another.')),
+      );
+      return;
+    }
+
+    // Route exists — proceed
+    if (!mounted) return;
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => SchedulePage(
+          origin: origin,
+          destination: dest,
+          date: date,
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -33,6 +70,7 @@ class _HomePageState extends State<HomePage> {
             icon: const Icon(Icons.logout, color: Colors.white),
             onPressed: () async {
               await FirebaseAuth.instance.signOut();
+              if (!mounted) return;
               Navigator.pushReplacement(
                 context,
                 MaterialPageRoute(builder: (_) => const LoginPage()),
@@ -44,7 +82,7 @@ class _HomePageState extends State<HomePage> {
       body: _selectedIndex == 0
           ? _buildMainContent()
           : _selectedIndex == 1
-          ? const GpsMapPage()        // <-- middle tab = GPS
+          ? const GpsMapPage() // middle tab = GPS
           : _buildProfilePage(),
       bottomNavigationBar: BottomNavigationBar(
         currentIndex: _selectedIndex,
@@ -110,55 +148,79 @@ class _HomePageState extends State<HomePage> {
             ),
             child: Column(
               children: [
-                _buildTextField(context, "Origin", Icons.location_on, selectedOrigin, () async {
-                  final result = await Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (_) => const LocationSearchPage(title: 'Search Origin'),
-                    ),
-                  );
-                  if (result != null) setState(() => selectedOrigin = result);
-                }),
-                const SizedBox(height: 10),
-                _buildTextField(context, "Destination", Icons.flag, selectedDestination, () async {
-                  final result = await Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (_) => const LocationSearchPage(title: 'Search Destination'),
-                    ),
-                  );
-                  if (result != null) setState(() => selectedDestination = result);
-                }),
-                const SizedBox(height: 10),
-                _buildTextField(context, "Date", Icons.calendar_month, selectedDate, () async {
-                  final result = await Navigator.push(
-                    context,
-                    MaterialPageRoute(builder: (_) => const DatePickerPage()),
-                  );
-                  if (result != null) setState(() => selectedDate = result);
-                }),
-                const SizedBox(height: 20),
-                ElevatedButton(
-                  onPressed: () {
-                    if (selectedOrigin != null &&
-                        selectedDestination != null &&
-                        selectedDate != null) {
-                      Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (_) => SchedulePage(
-                            origin: selectedOrigin!,
-                            destination: selectedDestination!,
-                            date: selectedDate!,
-                          ),
+                // Origin picker
+                _buildTextField(
+                  context,
+                  "Origin",
+                  Icons.location_on,
+                  selectedOrigin,
+                      () async {
+                    final result = await Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => const LocationSearchPage(
+                          title: 'Search Origin',
                         ),
-                      );
-                    } else {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('Please select all fields')),
-                      );
+                      ),
+                    );
+                    if (result != null) {
+                      // If origin changes, clear destination (to avoid mismatch)
+                      setState(() {
+                        selectedOrigin = result as String;
+                        selectedDestination = null;
+                      });
                     }
                   },
+                ),
+                const SizedBox(height: 10),
+
+                // Destination picker (filters by selected origin)
+                _buildTextField(
+                  context,
+                  "Destination",
+                  Icons.flag,
+                  selectedDestination,
+                      () async {
+                    if (selectedOrigin == null) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('Please select origin first')),
+                      );
+                      return;
+                    }
+                    final result = await Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => LocationSearchPage(
+                          title: 'Search Destination',
+                          originFilter: selectedOrigin, // ✅ filter destinations by origin
+                        ),
+                      ),
+                    );
+                    if (result != null) {
+                      setState(() => selectedDestination = result as String);
+                    }
+                  },
+                ),
+                const SizedBox(height: 10),
+
+                // Date picker
+                _buildTextField(
+                  context,
+                  "Date",
+                  Icons.calendar_month,
+                  selectedDate,
+                      () async {
+                    final result = await Navigator.push(
+                      context,
+                      MaterialPageRoute(builder: (_) => const DatePickerPage()),
+                    );
+                    if (result != null) setState(() => selectedDate = result as String);
+                  },
+                ),
+
+                const SizedBox(height: 20),
+                ElevatedButton(
+                  onPressed: _goScheduleIfRouteExists, // ✅ verify route exists
                   style: ElevatedButton.styleFrom(
                     backgroundColor: Colors.red,
                     shape: RoundedRectangleBorder(
