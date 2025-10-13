@@ -1,3 +1,4 @@
+// lib/pages/driver_service.dart
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 
@@ -6,59 +7,104 @@ class DriverService {
   static final instance = DriverService._();
 
   final _fs = FirebaseFirestore.instance;
-  String get uid => FirebaseAuth.instance.currentUser!.uid;
 
+  // ----------------- helpers -----------------
+  String _todayYmd() {
+    final now = DateTime.now();
+    final y = now.year.toString().padLeft(4, '0');
+    final m = now.month.toString().padLeft(2, '0');
+    final d = now.day.toString().padLeft(2, '0');
+    return '$y-$m-$d';
+  }
+
+  String? _uid() => FirebaseAuth.instance.currentUser?.uid;
+  String? _email() => FirebaseAuth.instance.currentUser?.email;
+
+  // ----------------- driver profile -----------------
+
+  /// Live stream of the current driver's profile document.
   Stream<DocumentSnapshot<Map<String, dynamic>>> driverStream() {
+    final uid = _uid();
+    if (uid == null) {
+      // Return an empty stream if not signed in
+      return const Stream.empty();
+    }
     return _fs.collection('drivers').doc(uid).snapshots();
   }
 
+  /// Update driver's info (used in EditDriverPage)
   Future<void> updateDriver({
-    required String name,
-    required String phone,
+    String? name,
+    String? phone,
   }) async {
+    final uid = _uid();
+    if (uid == null) throw Exception('Not signed in.');
     await _fs.collection('drivers').doc(uid).set({
-      'name': name,
-      'phone': phone,
+      if (name != null) 'name': name,
+      if (phone != null) 'phone': phone,
       'updatedAt': FieldValue.serverTimestamp(),
     }, SetOptions(merge: true));
   }
 
-  String todayKey() {
-    final now = DateTime.now();
-    final m = now.month.toString().padLeft(2, '0');
-    final d = now.day.toString().padLeft(2, '0');
-    return '${now.year}-$m-$d';
-  }
+  // ----------------- schedule / seats -----------------
 
+  /// ✅ Stream only THIS driver's trips for today (driver copies only)
   Stream<QuerySnapshot<Map<String, dynamic>>> todayTrips() {
-    return _fs.collection('trips')
+    final uid = _uid()!;
+    final ymd = _todayYmd();
+
+    return _fs
+        .collection('trips')
         .where('driverId', isEqualTo: uid)
-        .where('date', isEqualTo: todayKey())
-        .orderBy('time')
+        .where('date', isEqualTo: ymd)
+        .where('role', isEqualTo: 'driver') // ✅ only driver trips
         .snapshots();
   }
 
+  /// Stream of booked seats for a given (driver) trip id.
+  Stream<QuerySnapshot<Map<String, dynamic>>> seatsForTrip(String tripId) {
+    return _fs
+        .collection('booked_seats')
+        .where('tripId', isEqualTo: tripId)
+        .snapshots();
+  }
+
+  // ----------------- issue reporting -----------------
+
+  /// Report an issue (used in dashboard chips)
   Future<void> reportIssue({
     required String type,
     String? note,
     String? tripId,
   }) async {
+    final uid = _uid();
+    if (uid == null) throw Exception('Not signed in.');
     await _fs.collection('issues').add({
-      'driverId': uid,
       'type': type,
-      'note': note ?? '',
+      'note': (note ?? '').trim(),
+      'driverId': uid,
+      'driverEmail': _email(),
       'tripId': tripId,
+      'status': 'open',
       'createdAt': FieldValue.serverTimestamp(),
     });
   }
 
+  // ----------------- leave requests -----------------
+
+  /// Submit a leave/MC request (used in LeaveRequestPage)
   Future<void> requestLeave({
     required DateTime from,
     required DateTime to,
     required String reason,
   }) async {
-    await _fs.collection('leaves').add({
+    final uid = _uid();
+    if (uid == null) throw Exception('Not signed in.');
+    if (to.isBefore(from)) throw Exception('Invalid date range.');
+
+    await _fs.collection('leave_requests').add({
       'driverId': uid,
+      'driverEmail': _email(),
       'from': Timestamp.fromDate(from),
       'to': Timestamp.fromDate(to),
       'reason': reason,

@@ -19,7 +19,6 @@ class _DriverHomePageState extends State<DriverHomePage> {
   final _auth = FirebaseAuth.instance;
   final _fs = FirebaseFirestore.instance;
 
-  /// Ensures a driver doc exists with at least {status:'offline'}.
   Future<void> _ensureDriverDoc(String uid) async {
     final ref = _fs.collection('drivers').doc(uid);
     final snap = await ref.get();
@@ -53,16 +52,14 @@ class _DriverHomePageState extends State<DriverHomePage> {
   Widget build(BuildContext context) {
     final user = _auth.currentUser;
     if (user == null) {
-      // If somehow not logged in, bounce to login
       Future.microtask(_signOut);
-      return const Scaffold(
-        body: Center(child: CircularProgressIndicator()),
-      );
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
 
+    // Tabs: Home (Dashboard), GPS (placeholder), Profile
     final pages = const [
       DriverDashboard(),
-      DriverSchedulePage(),
+      _GpsPage(), // 👈 middle tab is GPS now
       DriverProfilePage(),
     ];
 
@@ -72,27 +69,18 @@ class _DriverHomePageState extends State<DriverHomePage> {
       stream: docRef.snapshots(),
       builder: (context, snap) {
         if (snap.connectionState == ConnectionState.waiting) {
-          // Also make sure the doc exists at least once
           _ensureDriverDoc(user.uid);
-          return const Scaffold(
-            body: Center(child: CircularProgressIndicator()),
-          );
+          return const Scaffold(body: Center(child: CircularProgressIndicator()));
         }
-
         if (!snap.hasData || !snap.data!.exists) {
-          // Create a baseline doc then render loading once
           _ensureDriverDoc(user.uid);
-          return const Scaffold(
-            body: Center(child: CircularProgressIndicator()),
-          );
+          return const Scaffold(body: Center(child: CircularProgressIndicator()));
         }
 
         final data = snap.data!.data() ?? {};
         final status = (data['status'] ?? 'offline').toString().toLowerCase();
         final isOnline = status == 'online';
         final disabled = (data['disabled'] as bool?) ?? false;
-
-        // If admin disabled this account, force offline and block everything.
         final blocking = disabled || !isOnline;
 
         return Scaffold(
@@ -101,22 +89,17 @@ class _DriverHomePageState extends State<DriverHomePage> {
             title: const Text('Driver'),
             foregroundColor: Colors.white,
             actions: [
-              // Online switch
               Row(
                 children: [
                   const Text('Online', style: TextStyle(color: Colors.white)),
                   Switch.adaptive(
                     value: isOnline && !disabled,
-                    onChanged: disabled
-                        ? null
-                        : (v) async {
+                    onChanged: disabled ? null : (v) async {
                       try {
                         await _setOnline(user.uid, v);
                         if (!v && mounted) {
                           ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              content: Text('You are now offline.'),
-                            ),
+                            const SnackBar(content: Text('You are now offline.')),
                           );
                         }
                       } catch (e) {
@@ -142,12 +125,8 @@ class _DriverHomePageState extends State<DriverHomePage> {
             ],
           ),
 
-          // Body: show page, but absorb input when offline/disabled and overlay a blocker.
           body: Stack(
             children: [
-              // Main content
-              // We still show it (dimmed) so drivers see context,
-              // but can’t interact when offline.
               AbsorbPointer(
                 absorbing: blocking,
                 child: AnimatedOpacity(
@@ -156,8 +135,6 @@ class _DriverHomePageState extends State<DriverHomePage> {
                   child: pages[_index],
                 ),
               ),
-
-              // Blocking overlay (if offline or disabled)
               if (blocking)
                 Container(
                   color: Colors.black.withOpacity(0.05),
@@ -175,26 +152,20 @@ class _DriverHomePageState extends State<DriverHomePage> {
                         child: Column(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            Icon(
-                              disabled ? Icons.block : Icons.cloud_off,
-                              size: 56,
-                              color: disabled ? Colors.red : Colors.grey,
-                            ),
+                            Icon(disabled ? Icons.block : Icons.cloud_off,
+                                size: 56,
+                                color: disabled ? Colors.red : Colors.grey),
                             const SizedBox(height: 12),
                             Text(
-                              disabled
-                                  ? 'Account Disabled'
-                                  : 'You’re Offline',
+                              disabled ? 'Account Disabled' : 'You’re Offline',
                               style: const TextStyle(
-                                fontSize: 18,
-                                fontWeight: FontWeight.bold,
-                              ),
+                                  fontSize: 18, fontWeight: FontWeight.bold),
                             ),
                             const SizedBox(height: 8),
                             Text(
                               disabled
                                   ? 'Please contact admin for access.'
-                                  : 'Go online to access dashboard, schedule, and other actions.',
+                                  : 'Go online to access dashboard, GPS, and profile.',
                               textAlign: TextAlign.center,
                               style: const TextStyle(color: Colors.black54),
                             ),
@@ -217,10 +188,7 @@ class _DriverHomePageState extends State<DriverHomePage> {
                               const SizedBox(height: 12),
                               const Text(
                                 'You can still sign out from the top-right.',
-                                style: TextStyle(
-                                  color: Colors.black45,
-                                  fontSize: 12,
-                                ),
+                                style: TextStyle(color: Colors.black45, fontSize: 12),
                               ),
                             ],
                           ],
@@ -232,7 +200,6 @@ class _DriverHomePageState extends State<DriverHomePage> {
             ],
           ),
 
-          // Bottom navigation: blocked when offline/disabled
           bottomNavigationBar: AbsorbPointer(
             absorbing: blocking,
             child: Opacity(
@@ -256,7 +223,7 @@ class _DriverHomePageState extends State<DriverHomePage> {
                 },
                 items: const [
                   BottomNavigationBarItem(icon: Icon(Icons.home), label: ''),
-                  BottomNavigationBarItem(icon: Icon(Icons.schedule), label: ''),
+                  BottomNavigationBarItem(icon: Icon(Icons.map), label: ''), // 👈 GPS
                   BottomNavigationBarItem(icon: Icon(Icons.person), label: ''),
                 ],
               ),
@@ -264,6 +231,23 @@ class _DriverHomePageState extends State<DriverHomePage> {
           ),
         );
       },
+    );
+  }
+}
+
+/// Simple placeholder GPS page
+class _GpsPage extends StatelessWidget {
+  const _GpsPage();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Scaffold(
+      body: Center(
+        child: Text(
+          'GPS tracking coming soon',
+          style: TextStyle(color: Colors.grey),
+        ),
+      ),
     );
   }
 }

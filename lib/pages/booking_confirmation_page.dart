@@ -10,9 +10,9 @@ class BookingConfirmationPage extends StatefulWidget {
   final List<String> selectedSeats;
   final String origin;
   final String destination;
-  final String time;        // "7:00 AM" (12h)
+  final String time;        // e.g. "7:00 AM" (12h)
   final String date;        // "YYYY-MM-DD"
-  final String scheduleId;  // e.g. "Relau_INTIPenang_7:00AM" (your existing scheme)
+  final String scheduleId;  // e.g., "Relau_INTIPenang_7:00AM"
 
   const BookingConfirmationPage({
     super.key,
@@ -62,82 +62,107 @@ class _BookingConfirmationPageState extends State<BookingConfirmationPage> {
     }
   }
 
-  /// Convert "7:00 AM" -> "07:00" (24h) so the driver schedule can sort reliably.
+  // 12h -> 24h ("7:05 AM" -> "07:05"); if already 24h, returns as-is.
   String _to24h(String t12) {
-    final s = t12.trim().toUpperCase();
-    final isAm = s.endsWith('AM');
-    final isPm = s.endsWith('PM');
-    final core = s.replaceAll('AM', '').replaceAll('PM', '').trim(); // "7:05"
+    final s = t12.trim();
+    // already 24h?
+    final m24 = RegExp(r'^(\d{1,2}):(\d{2})$').firstMatch(s);
+    if (m24 != null) {
+      final h = int.parse(m24.group(1)!);
+      final mm = m24.group(2)!;
+      return '${h.toString().padLeft(2, '0')}:$mm';
+    }
+    // 12h with AM/PM
+    final up = s.toUpperCase();
+    final isAm = up.endsWith('AM');
+    final isPm = up.endsWith('PM');
+    final core = up.replaceAll('AM', '').replaceAll('PM', '').trim();
     final parts = core.split(':');
-    int h = int.parse(parts[0]);
-    final m = parts.length > 1 ? int.parse(parts[1]) : 0;
+    int h = int.tryParse(parts[0]) ?? 0;
+    final m = parts.length > 1 ? int.tryParse(parts[1]) ?? 0 : 0;
     if (isPm && h != 12) h += 12;
     if (isAm && h == 12) h = 0;
     return '${h.toString().padLeft(2, '0')}:${m.toString().padLeft(2, '0')}';
   }
 
-  /// Ensure a trip exists and return its docId (idempotent).
-  /// Trip doc is used by driver pages and to anchor seats (via tripId).
+  // ---------- TRIP UPSERT (robust; surfaces errors) ----------
   Future<String> _ensureTrip() async {
     final user = FirebaseAuth.instance.currentUser!;
     final fs = FirebaseFirestore.instance;
 
-    final routeKey = '${widget.origin.trim()}|${widget.destination.trim()}';
-    final routeSnap = await fs.collection('routes').doc(routeKey).get();
-    if (!routeSnap.exists) {
-      throw Exception('Route not found: $routeKey');
-    }
-    final route = routeSnap.data()!;
-    final busCode = (route['busCode'] ?? '').toString();
-    String? driverId = (route['driverId'] as String?);
+    String driverId = 'unassigned';
+    String busCode = '';
 
-    if ((driverId == null || driverId.isEmpty) && busCode.isNotEmpty) {
-      final ds = await fs
-          .collection('drivers')
-          .where('busCode', isEqualTo: busCode)
-          .where('disabled', isEqualTo: false)
-          .limit(1)
-          .get();
-      if (ds.docs.isEmpty) {
-        throw Exception('No active driver for busCode $busCode');
+    // Try to get driverId/busCode from routes (best-effort)
+    try {
+      final routeKey = '${widget.origin.trim()}|${widget.destination.trim()}';
+      final routeSnap = await fs.collection('routes').doc(routeKey).get();
+      if (routeSnap.exists) {
+        final route = routeSnap.data()!;
+        busCode = (route['busCode'] ?? '').toString();
+        final fromRoute = (route['driverId'] as String? ?? '').trim();
+        if (fromRoute.isNotEmpty) driverId = fromRoute;
       }
-      driverId = ds.docs.first.id; // driver docId = UID
+      // fallback via busCode -> a driver with this bus
+      if (driverId == 'unassigned' && busCode.isNotEmpty) {
+        final ds = await fs
+            .collection('drivers')
+            .where('busCode', isEqualTo: busCode)
+            .where('disabled', isEqualTo: false)
+            .limit(1)
+            .get();
+        if (ds.docs.isNotEmpty) driverId = ds.docs.first.id;
+      }
+    } catch (e) {
+      // keep going
+      debugPrint('[ensureTrip] route/driver lookup failed: $e');
     }
 
     final time24 = _to24h(widget.time);
 
-    // Stable natural key prevents duplicates on retry:
-    final tripId = '${user.uid}|$routeKey|${widget.date}|$time24'
+    // IMPORTANT: include driverId (or "unassigned") in the trip doc id
+    final tripId =
+    '$driverId|${widget.origin}|${widget.destination}|${widget.date}|$time24'
         .replaceAll(' ', '');
 
     final tripRef = fs.collection('trips').doc(tripId);
 
-    await fs.runTransaction((tx) async {
-      final snap = await tx.get(tripRef);
-      if (!snap.exists) {
-        tx.set(tripRef, {
+    try {
+      final existing = await tripRef.get();
+      if (!existing.exists) {
+        await tripRef.set({
           'tripId'      : tripId,
-          'studentId'   : user.uid,
-          'studentEmail': user.email,
           'origin'      : widget.origin,
           'destination' : widget.destination,
-          'date'        : widget.date,   // "YYYY-MM-DD"
-          'time'        : time24,        // "HH:mm"
+          'date'        : widget.date,
+          'time'        : time24,
           'busCode'     : busCode,
-          'driverId'    : driverId,
+          'driverId'    : driverId,           // "unassigned" if none
           'status'      : 'scheduled',
           'createdAt'   : FieldValue.serverTimestamp(),
-        });
+
+          // metadata about first creator (student)
+          'createdBy'   : user.uid,
+          'creatorEmail': user.email,
+        }, SetOptions(merge: true));
+      } else {
+        await tripRef.set({
+          'updatedAt'   : FieldValue.serverTimestamp(),
+          if (busCode.isNotEmpty) 'busCode': busCode,
+          if (driverId.isNotEmpty) 'driverId': driverId,
+        }, SetOptions(merge: true));
       }
-    });
+    } catch (e) {
+      rethrow; // surfaced by _confirm()
+    }
 
     return tripId;
   }
 
-  /// Your previous uniqueness: scheduleId + date + seat.
+  // uniqueness: scheduleId + date + seat
   String _seatDocId(String seat) => '${widget.scheduleId}|${widget.date}|$seat';
 
-  /// Re-check that selected seats are still free.
+  // re-check that selected seats are still free
   Future<List<String>> _alreadyBookedSeats() async {
     final fs = FirebaseFirestore.instance;
     final taken = <String>[];
@@ -145,7 +170,9 @@ class _BookingConfirmationPageState extends State<BookingConfirmationPage> {
 
     for (int i = 0; i < widget.selectedSeats.length; i += chunk) {
       final part = widget.selectedSeats.sublist(
-        i, (i + chunk > widget.selectedSeats.length) ? widget.selectedSeats.length : i + chunk,
+        i, (i + chunk > widget.selectedSeats.length)
+          ? widget.selectedSeats.length
+          : i + chunk,
       );
 
       final q = await fs
@@ -174,38 +201,41 @@ class _BookingConfirmationPageState extends State<BookingConfirmationPage> {
     setState(() => _saving = true);
 
     try {
-      // 1) ensure the trip exists (and get its id)
+      // 1) ensure trip exists (driver-based if possible)
       final tripId = await _ensureTrip();
 
       // 2) race-safe seat check
       final taken = await _alreadyBookedSeats();
       if (taken.isNotEmpty) {
-        final msg = 'These seats were just taken: ${taken.join(', ')}. Please pick others.';
+        final msg =
+            'These seats were just taken: ${taken.join(', ')}. Please pick others.';
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
         setState(() => _saving = false);
         return;
       }
 
-      // 3) write booked_seats with studentId + tripId (so QR page can find them)
+      // 3) write booked_seats anchored to the trip
       final fs = FirebaseFirestore.instance;
       final batch = fs.batch();
+      final time24 = _to24h(widget.time); // << store 24h so driver scan matches
       for (final seat in widget.selectedSeats) {
         final ref = fs.collection('booked_seats').doc(_seatDocId(seat));
         batch.set(ref, {
-          'tripId'     : tripId,                 // 👈 anchor to trip
-          'studentId'  : user.uid,               // 👈 not "userId"
+          'tripId'      : tripId,          // anchor to trip (even if "unassigned")
+          'studentId'   : user.uid,
           'studentEmail': _email,
           'studentName' : _name,
           'studentPhone': _phone,
 
-          'seatNumber' : seat,
-          'scheduleId' : widget.scheduleId,
-          'date'       : widget.date,            // keep same format
-          'time'       : widget.time,            // store 12h if you like, not used for queries
-          'origin'     : widget.origin,
-          'destination': widget.destination,
+          'seatNumber'  : seat,
+          'scheduleId'  : widget.scheduleId,
+          'date'        : widget.date,
+          'time'        : time24,          // ✅ always saved in 24h ("19:00")
+          'origin'      : widget.origin,
+          'destination' : widget.destination,
 
-          'createdAt'  : FieldValue.serverTimestamp(),
+          'createdAt'   : FieldValue.serverTimestamp(),
+          'locked'      : false,
         }, SetOptions(merge: false));
       }
       await batch.commit();
@@ -215,16 +245,17 @@ class _BookingConfirmationPageState extends State<BookingConfirmationPage> {
         const SnackBar(content: Text('Booking confirmed!')),
       );
 
-      // 4) back to Home
       Navigator.of(context).pushAndRemoveUntil(
         MaterialPageRoute(builder: (_) => const HomePage()),
             (route) => false,
       );
     } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed to confirm booking: $e')),
-      );
+      final msg = e.toString();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to confirm booking: $msg')),
+        );
+      }
     } finally {
       if (mounted) setState(() => _saving = false);
     }

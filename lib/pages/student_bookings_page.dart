@@ -1,4 +1,4 @@
-import 'dart:async';
+// lib/pages/student_bookings_page.dart
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
@@ -6,248 +6,361 @@ import 'booking_qr_page.dart';
 
 class StudentsBookingsPage extends StatefulWidget {
   const StudentsBookingsPage({super.key});
-
   @override
   State<StudentsBookingsPage> createState() => _StudentsBookingsPageState();
 }
 
 class _StudentsBookingsPageState extends State<StudentsBookingsPage> {
-  final _user = FirebaseAuth.instance.currentUser;
+  final _fs = FirebaseFirestore.instance;
+  final _auth = FirebaseAuth.instance;
 
-  // If you created a composite index for: where(studentId) + orderBy(date) + orderBy(time)
-  // you can flip this to true to let Firestore sort. Otherwise we sort on the client.
-  static const bool USE_FIRESTORE_SORTING = false;
+  // If true, we will delete past seats from DB + delete orphan trips.
+  static const bool PURGE_PAST_FROM_DB = true;
 
-  // Delete past trips automatically (best effort batch). Requires rules allowing the owner to delete their own trip.
-  static const bool AUTO_DELETE_PAST = true;
-
-  Stream<QuerySnapshot<Map<String, dynamic>>>? _stream;
+  // Cache trip docs to avoid repeat reads
+  final Map<String, DocumentSnapshot<Map<String, dynamic>>> _tripCache = {};
 
   @override
   void initState() {
     super.initState();
-    _buildStream();
+    _purgePastForUser(); // best-effort cleanup on open
   }
 
-  void _buildStream() {
-    final base = FirebaseFirestore.instance
-        .collection('trips')
-        .where('studentId', isEqualTo: _user?.uid);
+  // -------------------- Trip cache --------------------
+  Future<DocumentSnapshot<Map<String, dynamic>>?> _getTrip(String tripId) async {
+    if (tripId.isEmpty) return null;
+    if (_tripCache.containsKey(tripId)) return _tripCache[tripId];
 
-    _stream = USE_FIRESTORE_SORTING
-        ? base.orderBy('date').orderBy('time').snapshots()
-        : base.snapshots();
-    setState(() {});
-  }
-
-  // -------- Helpers --------
-
-  /// Parse "YYYY-MM-DD" + "HH:mm" (24h) into a local DateTime.
-  DateTime? _parseTripDateTime(String date, String time) {
-    try {
-      final parts = date.split('-');
-      final tparts = time.split(':');
-      if (parts.length != 3 || tparts.length != 2) return null;
-      final y = int.parse(parts[0]);
-      final m = int.parse(parts[1]);
-      final d = int.parse(parts[2]);
-      final hh = int.parse(tparts[0]);
-      final mm = int.parse(tparts[1]);
-      return DateTime(y, m, d, hh, mm);
-    } catch (_) {
-      return null;
+    var snap = await _fs.collection('trips').doc(tripId).get();
+    if (!snap.exists) {
+      final q = await _fs
+          .collection('trips')
+          .where('tripId', isEqualTo: tripId)
+          .limit(1)
+          .get();
+      if (q.docs.isNotEmpty) snap = q.docs.first;
     }
+    if (snap.exists) _tripCache[tripId] = snap;
+    return snap.exists ? snap : null;
   }
 
-  /// True if this trip already happened (strictly before "now").
-  bool _isPast(Map<String, dynamic> data) {
-    final dt = _parseTripDateTime(
-      (data['date'] ?? '').toString(),
-      (data['time'] ?? '').toString(),
-    );
-    if (dt == null) return false;
-    return dt.isBefore(DateTime.now());
+  // -------------------- Time parsing --------------------
+  DateTime? _parseLocal(String date, String timeRaw) {
+    if (date.isEmpty || timeRaw.isEmpty) return null;
+    String t = timeRaw.trim();
+    final hasAmPm =
+    RegExp(r'(AM|PM)$', caseSensitive: false).hasMatch(t.replaceAll(' ', ''));
+    if (hasAmPm) {
+      final up = t.toUpperCase().replaceAll(' ', '');
+      final am = up.endsWith('AM');
+      final pm = up.endsWith('PM');
+      final core = up.substring(0, up.length - 2); // "1:05" or "1"
+      final parts = core.split(':');
+      int h = int.tryParse(parts[0]) ?? 0;
+      final m = parts.length > 1 ? (int.tryParse(parts[1]) ?? 0) : 0;
+      if (pm && h != 12) h += 12;
+      if (am && h == 12) h = 0;
+      t = '${h.toString().padLeft(2, '0')}:${m.toString().padLeft(2, '0')}';
+    } else if (!t.contains(':')) {
+      final hh = int.tryParse(t) ?? 0;
+      t = '${hh.toString().padLeft(2, '0')}:00';
+    }
+    return DateTime.tryParse('${date}T$t:00');
   }
 
-  Future<void> _deletePastTrips(List<QueryDocumentSnapshot<Map<String, dynamic>>> docs) async {
-    if (!AUTO_DELETE_PAST || _user == null) return;
+  // -------------------- scheduleId variants --------------------
+  List<String> _scheduleIdCandidates({
+    required String origin,
+    required String destination,
+    required String timeRaw, // "13:00" or "1:00 PM"
+  }) {
+    String noSpace(String s) => s.replaceAll(' ', '');
+    String to12h(String time24) {
+      final m = RegExp(r'^(\d{1,2}):(\d{2})$').firstMatch(time24.trim());
+      if (m == null) return time24;
+      var h = int.tryParse(m.group(1)!) ?? 0;
+      final min = m.group(2)!;
+      final am = h < 12;
+      if (h == 0) h = 12;
+      if (h > 12) h -= 12;
+      return '$h:$min ${am ? 'AM' : 'PM'}';
+    }
 
-    final fs = FirebaseFirestore.instance;
-    final batch = fs.batch();
-    int count = 0;
+    final ori = origin.trim();
+    final dst = destination.trim();
+    final dstNo = noSpace(dst);
 
-    for (final d in docs) {
-      final data = d.data();
-      if (_isPast(data)) {
-        batch.delete(d.reference);
-        count++;
+    final up = timeRaw.trim();
+    final hasAmPm = up.toUpperCase().endsWith('AM') || up.toUpperCase().endsWith('PM');
+    final t12 = hasAmPm ? up.toUpperCase() : to12h(up).toUpperCase();
+    final t24NoColon = up.replaceAll(':', '');
+    final t12NoSpace = t12.replaceAll(' ', '');
+    final t12NoColon = t12.replaceAll(':', '');
+    final t12NoColonNoSpace = t12NoColon.replaceAll(' ', '');
+
+    final set = <String>{
+      '${ori}_${dst}_$up',
+      '${ori}_${dstNo}_$up',
+      '${ori}_${dst}_$t24NoColon',
+      '${ori}_${dstNo}_$t24NoColon',
+      '${ori}_${dst}_$t12',
+      '${ori}_${dstNo}_$t12',
+      '${ori}_${dst}_$t12NoSpace',
+      '${ori}_${dstNo}_$t12NoSpace',
+      '${ori}_${dstNo}_$t12NoColonNoSpace',
+    };
+    return set.take(10).toList(); // Firestore whereIn limit
+  }
+
+  // -------------------- Delete an entire trip safely --------------------
+  Future<void> _deleteTripCompletely(
+      DocumentReference<Map<String, dynamic>> tripRef) async {
+    final tripId = tripRef.id;
+
+    // delete scans/*
+    final scans = await tripRef.collection('scans').get();
+    for (int i = 0; i < scans.docs.length; i += 400) {
+      final part = scans.docs
+          .sublist(i, (i + 400 > scans.docs.length) ? scans.docs.length : i + 400);
+      final b = _fs.batch();
+      for (final d in part) b.delete(d.reference);
+      await b.commit();
+    }
+
+    // delete boardings with this tripId
+    final bq =
+    await _fs.collection('boardings').where('tripId', isEqualTo: tripId).get();
+    for (int i = 0; i < bq.docs.length; i += 400) {
+      final part = bq.docs
+          .sublist(i, (i + 400 > bq.docs.length) ? bq.docs.length : i + 400);
+      final b = _fs.batch();
+      for (final d in part) b.delete(d.reference);
+      await b.commit();
+    }
+
+    // delete the trip itself
+    await tripRef.delete();
+  }
+
+  // -------------------- After seat deletion, remove orphan trips --------------------
+  Future<void> _maybeDeleteOrphanTrip(String tripId) async {
+    if (tripId.isEmpty) return;
+    final snap = await _getTrip(tripId);
+    if (snap == null || !snap.exists) return;
+
+    final t = snap.data()!;
+    final uid = _auth.currentUser?.uid;
+    // Only delete trip doc created by THIS student
+    if (uid == null || (t['studentId'] ?? '') != uid) return;
+
+    final origin = (t['origin'] ?? '').toString();
+    final dest = (t['destination'] ?? '').toString();
+    final time = (t['time'] ?? t['time12'] ?? '').toString();
+
+    // Check if ANY booked_seats remain (any user) for this trip
+    bool anyLeft = false;
+
+    // a) direct reference by tripId (newer docs)
+    final qTripId = await _fs
+        .collection('booked_seats')
+        .where('tripId', isEqualTo: tripId)
+        .limit(1)
+        .get();
+    anyLeft = qTripId.docs.isNotEmpty;
+
+    // b) legacy scheduleId variants
+    if (!anyLeft && origin.isNotEmpty && dest.isNotEmpty && time.isNotEmpty) {
+      final cands =
+      _scheduleIdCandidates(origin: origin, destination: dest, timeRaw: time);
+      for (int i = 0; i < cands.length && !anyLeft; i += 10) {
+        final chunk =
+        cands.sublist(i, (i + 10 > cands.length) ? cands.length : i + 10);
+        final q = await _fs
+            .collection('booked_seats')
+            .where('scheduleId', whereIn: chunk)
+            .limit(1)
+            .get();
+        anyLeft = q.docs.isNotEmpty;
       }
     }
-    if (count > 0) {
-      try {
-        await batch.commit();
-      } catch (_) {/* ignore cleanup failures */}
+
+    if (!anyLeft) {
+      await _deleteTripCompletely(snap.reference);
+      _tripCache.remove(tripId);
     }
   }
 
-  // -------- UI --------
+  // -------------------- Purge past seats (and orphan trips) --------------------
+  Future<void> _purgePastForUser() async {
+    if (!PURGE_PAST_FROM_DB) return;
+    final uid = _auth.currentUser?.uid;
+    if (uid == null) return;
+
+    final snap =
+    await _fs.collection('booked_seats').where('studentId', isEqualTo: uid).get();
+    if (snap.docs.isEmpty) return;
+
+    final toDelete =
+    <QueryDocumentSnapshot<Map<String, dynamic>>>[];
+    final affectedTripIds = <String>{};
+
+    for (final d in snap.docs) {
+      final s = d.data();
+      final tripId = (s['tripId'] ?? '').toString();
+      affectedTripIds.add(tripId);
+
+      // prefer trip's date/time
+      String date = '';
+      String time = '';
+      final trip = await _getTrip(tripId);
+      if (trip != null && trip.exists) {
+        final t = trip.data()!;
+        date = (t['date'] ?? '').toString();
+        time = (t['time'] ?? '').toString();
+      }
+      if (date.isEmpty) date = (s['date'] ?? '').toString();
+      if (time.isEmpty) {
+        time = (s['time'] ?? s['time12'] ?? s['time24'] ?? '').toString();
+      }
+
+      final dt = _parseLocal(date, time);
+      if (dt == null) continue;
+      if (dt.isBefore(DateTime.now().subtract(const Duration(minutes: 1)))) {
+        toDelete.add(d);
+      }
+    }
+
+    if (toDelete.isNotEmpty) {
+      const chunk = 400;
+      for (int i = 0; i < toDelete.length; i += chunk) {
+        final part = toDelete.sublist(
+            i, (i + chunk > toDelete.length) ? toDelete.length : i + chunk);
+        final b = _fs.batch();
+        for (final d in part) b.delete(d.reference);
+        try {
+          await b.commit();
+        } catch (e) {
+          debugPrint('Purge seats failed: $e');
+        }
+      }
+    }
+
+    // remove orphan trips for any affected tripIds
+    for (final tripId in affectedTripIds) {
+      await _maybeDeleteOrphanTrip(tripId);
+    }
+  }
+
+  // -------------------- Build each row (one seat = one card) --------------------
+  Future<_SeatRow?> _buildRow(
+      QueryDocumentSnapshot<Map<String, dynamic>> seatDoc) async {
+    final s = seatDoc.data();
+    final tripId = (s['tripId'] ?? '').toString();
+
+    final tripSnap = await _getTrip(tripId);
+    final trip = tripSnap?.data();
+
+    final date = ((trip?['date'] ?? s['date']) ?? '').toString();
+    final time =
+    ((trip?['time'] ?? s['time'] ?? s['time12'] ?? s['time24']) ?? '')
+        .toString();
+    final origin = ((s['origin'] ?? trip?['origin']) ?? '').toString();
+    final destination =
+    ((s['destination'] ?? trip?['destination']) ?? '').toString();
+
+    final dt = _parseLocal(date, time);
+    if (dt == null) return null; // filter unparseable
+
+    return _SeatRow(
+      id: seatDoc.id,                 // <- booked_seats doc id (important)
+      tripId: tripId,                 // <- /trips doc id
+      seat: (s['seatNumber'] ?? '').toString(),
+      date: date,
+      time: time,
+      origin: origin,
+      destination: destination,
+      busCode: (trip?['busCode'] ?? '').toString(),
+      status: (trip?['status'] ?? 'scheduled').toString(),
+      dt: dt,
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
+    final uid = _auth.currentUser?.uid;
+    if (uid == null) {
+      return const Scaffold(body: Center(child: Text('Please sign in')));
+    }
+
+    final stream = _fs
+        .collection('booked_seats')
+        .where('studentId', isEqualTo: uid)
+        .snapshots();
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('My Bookings'),
         backgroundColor: const Color(0xFFD32F2F),
         foregroundColor: Colors.white,
+        actions: [
+          IconButton(
+            tooltip: 'Refresh & purge',
+            icon: const Icon(Icons.refresh),
+            onPressed: () async {
+              await _purgePastForUser();
+              if (mounted) setState(() {});
+            },
+          ),
+        ],
       ),
-      body: _stream == null
-          ? const Center(child: CircularProgressIndicator())
-          : StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-        stream: _stream,
+      body: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+        stream: stream,
         builder: (context, snap) {
+          if (snap.connectionState == ConnectionState.waiting) {
+            return const Center(child: CircularProgressIndicator());
+          }
           if (snap.hasError) {
-            final msg = snap.error.toString();
-            final isIndexError = msg.contains('failed-precondition') && msg.contains('index');
-            return _ErrorCard(
-              message: msg,
-              onShowWithoutSorting: isIndexError && USE_FIRESTORE_SORTING
-                  ? () {
-                // fallback to client-sort
-                // (Set USE_FIRESTORE_SORTING=false above instead of here)
-                _buildStream();
-              }
-                  : null,
+            return Center(
+              child: Padding(
+                padding: const EdgeInsets.all(20),
+                child: Text('Error: ${snap.error}', textAlign: TextAlign.center),
+              ),
             );
           }
           if (!snap.hasData) {
             return const Center(child: CircularProgressIndicator());
           }
 
-          final all = snap.data!.docs;
+          final seatDocs = snap.data!.docs;
 
-          // optional best-effort cleanup
-          _deletePastTrips(all);
+          return FutureBuilder<List<_SeatRow?>>(
+            future: Future.wait(seatDocs.map(_buildRow)),
+            builder: (context, rowsSnap) {
+              if (rowsSnap.connectionState == ConnectionState.waiting) {
+                return const Center(child: CircularProgressIndicator());
+              }
 
-          // keep only now/future
-          final upcoming = all.where((d) => !_isPast(d.data())).toList();
+              final rows = rowsSnap.data
+                  ?.whereType<_SeatRow>()
+                  .where((r) => !r.dt.isBefore(
+                  DateTime.now().subtract(const Duration(minutes: 1))))
+                  .toList() ??
+                  [];
 
-          // local sort ASC by (date, time)
-          upcoming.sort((a, b) {
-            final ad = a.data(), bd = b.data();
-            final at = _parseTripDateTime(
-                (ad['date'] ?? '').toString(), (ad['time'] ?? '').toString()) ??
-                DateTime.fromMillisecondsSinceEpoch(0);
-            final bt = _parseTripDateTime(
-                (bd['date'] ?? '').toString(), (bd['time'] ?? '').toString()) ??
-                DateTime.fromMillisecondsSinceEpoch(0);
-            return at.compareTo(bt);
-          });
+              rows.sort((a, b) => a.dt.compareTo(b.dt));
 
-          if (upcoming.isEmpty) {
-            return const Center(
-              child: Text('No upcoming bookings.',
-                  style: TextStyle(color: Colors.grey, fontSize: 16)),
-            );
-          }
+              if (rows.isEmpty) {
+                return const Center(
+                  child: Text('No upcoming bookings.',
+                      style: TextStyle(color: Colors.grey, fontSize: 16)),
+                );
+              }
 
-          return ListView.separated(
-            padding: const EdgeInsets.all(14),
-            itemCount: upcoming.length,
-            separatorBuilder: (_, __) => const SizedBox(height: 8),
-            itemBuilder: (context, i) {
-              final doc = upcoming[i];
-              final data = doc.data();
-
-              final origin = (data['origin'] ?? '—').toString();
-              final dest = (data['destination'] ?? '—').toString();
-              final date = (data['date'] ?? '—').toString(); // "YYYY-MM-DD"
-              final time = (data['time'] ?? '—').toString(); // "HH:mm"
-              final busCode = (data['busCode'] ?? '—').toString();
-              final status = (data['status'] ?? 'scheduled').toString();
-
-              return Card(
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-                elevation: 2,
-                child: ListTile(
-                  contentPadding:
-                  const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                  visualDensity: VisualDensity.compact,
-                  leading: CircleAvatar(
-                    backgroundColor: Colors.red.shade100,
-                    child: const Icon(Icons.directions_bus, color: Color(0xFFD32F2F)),
-                  ),
-                  title: Text('$origin → $dest',
-                      style: const TextStyle(fontWeight: FontWeight.w600)),
-                  subtitle: Padding(
-                    padding: const EdgeInsets.only(top: 4.0),
-                    child: Text(
-                      '$date  •  $time  •  Bus: $busCode',
-                      style: const TextStyle(fontSize: 13, color: Colors.black54),
-                    ),
-                  ),
-
-                  // ***** Compact trailing to avoid overflow *****
-                  trailing: SizedBox(
-                    width: 86,
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        SizedBox(
-                          height: 26,
-                          child: FittedBox(
-                            fit: BoxFit.scaleDown,
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 8, vertical: 4),
-                              decoration: BoxDecoration(
-                                color: status == 'scheduled'
-                                    ? Colors.green.withOpacity(0.15)
-                                    : Colors.orange.withOpacity(0.15),
-                                borderRadius: BorderRadius.circular(8),
-                              ),
-                              child: Text(
-                                status,
-                                style: TextStyle(
-                                  color: status == 'scheduled'
-                                      ? Colors.green[800]
-                                      : Colors.orange[800],
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                        const SizedBox(height: 4),
-                        IconButton(
-                          tooltip: 'Show QR',
-                          iconSize: 22,
-                          padding: EdgeInsets.zero,
-                          constraints: const BoxConstraints(
-                              minWidth: 28, minHeight: 28),
-                          icon: const Icon(Icons.qr_code_2),
-                          onPressed: () {
-                            Navigator.push(
-                              context,
-                              MaterialPageRoute(
-                                builder: (_) => BookingQrPage(tripId: doc.id),
-                              ),
-                            );
-                          },
-                        ),
-                      ],
-                    ),
-                  ),
-                  onTap: () {
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) => BookingQrPage(tripId: doc.id),
-                      ),
-                    );
-                  },
-                ),
+              return ListView.separated(
+                padding: const EdgeInsets.all(12),
+                itemCount: rows.length,
+                separatorBuilder: (_, __) => const SizedBox(height: 8),
+                itemBuilder: (context, i) => _BookingCard(row: rows[i]),
               );
             },
           );
@@ -257,41 +370,126 @@ class _StudentsBookingsPageState extends State<StudentsBookingsPage> {
   }
 }
 
-class _ErrorCard extends StatelessWidget {
-  final String message;
-  final VoidCallback? onShowWithoutSorting;
+class _SeatRow {
+  final String id;        // <- booked_seats doc id
+  final String tripId;    // <- /trips doc id
+  final String seat;
+  final String date;
+  final String time;
+  final String origin;
+  final String destination;
+  final String busCode;
+  final String status;
+  final DateTime dt;
+  _SeatRow({
+    required this.id,
+    required this.tripId,
+    required this.seat,
+    required this.date,
+    required this.time,
+    required this.origin,
+    required this.destination,
+    required this.busCode,
+    required this.status,
+    required this.dt,
+  });
+}
 
-  const _ErrorCard({required this.message, this.onShowWithoutSorting});
+class _BookingCard extends StatelessWidget {
+  final _SeatRow row;
+  const _BookingCard({required this.row});
 
   @override
   Widget build(BuildContext context) {
-    final isIndexError =
-        message.contains('failed-precondition') && message.contains('index');
+    void openQr() {
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => BookingQrPage(
+            tripId: row.tripId,
+            seatDocId: row.id, // 👈 pass the SPECIFIC seat doc id
+          ),
+        ),
+      );
+    }
 
-    return Padding(
-      padding: const EdgeInsets.all(20),
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          const Icon(Icons.error_outline, size: 48, color: Colors.red),
-          const SizedBox(height: 12),
-          const Text('Unable to load bookings',
-              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-          const SizedBox(height: 8),
-          Text(message,
-              textAlign: TextAlign.center,
-              style: const TextStyle(color: Colors.red, fontSize: 12)),
-          const SizedBox(height: 16),
-          if (isIndexError && onShowWithoutSorting != null)
-            ElevatedButton.icon(
-              onPressed: onShowWithoutSorting,
-              icon: const Icon(Icons.visibility),
-              label: const Text('Show without sorting'),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFFD32F2F),
+    return Card(
+      elevation: 1.5,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(14),
+        onTap: openQr, // tap the card to open QR for this seat
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              CircleAvatar(
+                radius: 22,
+                backgroundColor: Colors.red.shade100,
+                child: const Icon(Icons.directions_bus, color: Color(0xFFD32F2F)),
               ),
-            ),
-        ],
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '${row.origin.isEmpty ? '—' : row.origin} → ${row.destination.isEmpty ? '—' : row.destination}',
+                      style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 16),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      '${row.date}  •  ${row.time}'
+                          '${row.busCode.isNotEmpty ? '  •  ${row.busCode}' : ''}\n'
+                          'Seat: ${row.seat}',
+                      style: const TextStyle(
+                        fontSize: 13,
+                        color: Colors.black54,
+                        height: 1.25,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: row.status == 'scheduled'
+                          ? Colors.green.withOpacity(0.15)
+                          : Colors.orange.withOpacity(0.15),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Text(
+                      row.status,
+                      style: TextStyle(
+                        color: row.status == 'scheduled'
+                            ? Colors.green[800]
+                            : Colors.orange[800],
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  IconButton(
+                    tooltip: 'Show QR',
+                    iconSize: 22,
+                    padding: EdgeInsets.zero,
+                    constraints:
+                    const BoxConstraints(minWidth: 28, minHeight: 28),
+                    icon: const Icon(Icons.qr_code_2),
+                    onPressed: openQr, // also opens the same QR
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
