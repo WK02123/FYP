@@ -4,19 +4,16 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
-import '../utils/time_utils.dart';
 
-
-/// Unified payload parsed from QR (supports 8-part and legacy 6-part)
+/// Parsed payload structure (works for 12-part legacy, 8-part current, 6-part very old)
 class ParsedPayload {
-  final String tripRefOrField; // may be trips docId OR value stored in trips.tripId
+  final String tripRefOrField; // driverTripId OR driverTrips.tripId value
   final String studentId;
-  final String? origin;        // present for 8-part payload
-  final String? destination;   // present for 8-part payload
-  final String dateStr;        // "YYYY-MM-DD"
-  final String timeStr;        // "HH:mm" OR "h:mm AM/PM"
-  final List<String> seats;    // at least one seat
-
+  final String? origin;
+  final String? destination;
+  final String dateStr;  // "YYYY-MM-DD"
+  final String timeStr;  // "HH:mm" or "h:mm AM/PM"
+  final List<String> seats;
   ParsedPayload({
     required this.tripRefOrField,
     required this.studentId,
@@ -61,7 +58,7 @@ class _DriverScanPageState extends State<DriverScanPage> {
     );
   }
 
-  // ---------- helpers ----------
+  // ---------------------- small helpers ----------------------
   String _norm(String? s) => (s ?? '').toLowerCase().replaceAll(RegExp(r'\s+'), '');
   String _fmtDate(dynamic v) {
     if (v == null) return '';
@@ -82,33 +79,50 @@ class _DriverScanPageState extends State<DriverScanPage> {
 
   String _to24(String t) {
     final s = t.trim();
-    if (RegExp(r'^\d{1,2}:\d{2}\s*(AM|PM)$', caseSensitive: false).hasMatch(s)) {
-      final ampm = s.toUpperCase().endsWith('AM') ? 'AM' : 'PM';
-      final hm = s.replaceAll(RegExp(r'\s*(AM|PM)', caseSensitive: false), '');
-      final parts = hm.split(':');
-      var h = int.tryParse(parts[0]) ?? 0;
-      final m = parts[1];
-      if (ampm == 'AM') {
-        if (h == 12) h = 0;
-      } else {
-        if (h != 12) h += 12;
-      }
-      return '${h.toString().padLeft(2, '0')}:$m';
+    final m24 = RegExp(r'^(\d{1,2}):(\d{2})$').firstMatch(s);
+    if (m24 != null) {
+      final h = int.parse(m24.group(1)!);
+      final mm = m24.group(2)!;
+      return '${h.toString().padLeft(2, '0')}:$mm';
+    }
+    if (RegExp(r'(AM|PM)$', caseSensitive: false).hasMatch(s.replaceAll(' ', ''))) {
+      final up = s.toUpperCase().replaceAll(' ', '');
+      final am = up.endsWith('AM');
+      final core = up.substring(0, up.length - 2); // "1:05" or "1"
+      final parts = core.split(':');
+      int h = int.tryParse(parts[0]) ?? 0;
+      final m = parts.length > 1 ? (int.tryParse(parts[1]) ?? 0) : 0;
+      if (!am && h != 12) h += 12;
+      if (am && h == 12) h = 0;
+      return '${h.toString().padLeft(2, '0')}:${m.toString().padLeft(2, '0')}';
     }
     return s;
   }
+  bool _timeEqualLoose(String a, String b) => _to24(a) == _to24(b);
 
-  bool _timeEqualLoose(String a, String b) => to24h(a) == to24h(b);
-
-
-  // ---------- parse QR ----------
+  // ---------------------- QR parse (supports 12/8/6) ----------------------
   ParsedPayload? _parsePayloadFlexible(String raw) {
     final parts = raw.split('|');
     if (parts.isEmpty || parts[0] != 'RIDEMATE') return null;
 
-    // 8-part (preferred)
+    // 12-part legacy you showed:
+    // RIDEMATE|<driverTripId>|Relau|INTIPenang|2025-10-14|19:00|<studentId>|Relau|INTI Penang|2025-10-14|19:00|B2
+    if (parts.length >= 12) {
+      return ParsedPayload(
+        tripRefOrField: parts[1].trim(),
+        studentId: parts[6].trim(),
+        origin: parts[2].trim(),
+        destination: parts[3].trim(),
+        dateStr: parts[4].trim(),
+        timeStr: parts[5].trim(),
+        seats: [parts[11].trim()],
+      );
+    }
+
+    // 8-part (current):
+    // RIDEMATE|driverTripId|studentId|origin|destination|date|time|seat
     if (parts.length >= 8) {
-      final seatName = parts[7].trim();
+      final seat = parts[7].trim();
       return ParsedPayload(
         tripRefOrField: parts[1].trim(),
         studentId: parts[2].trim(),
@@ -116,14 +130,14 @@ class _DriverScanPageState extends State<DriverScanPage> {
         destination: parts[4].trim(),
         dateStr: parts[5].trim(),
         timeStr: parts[6].trim(),
-        seats: seatName.isEmpty ? [] : [seatName],
+        seats: seat.isEmpty ? [] : [seat],
       );
     }
 
-    // 6-part (legacy)
+    // 6-part (very old)
+    // RIDEMATE|trip|student|date|time|A1,A2
     if (parts.length >= 6) {
-      final seatsCsv = parts[5].trim();
-      final seats = seatsCsv
+      final seats = parts[5]
           .split(',')
           .map((s) => s.trim())
           .where((s) => s.isNotEmpty)
@@ -134,30 +148,29 @@ class _DriverScanPageState extends State<DriverScanPage> {
         dateStr: parts[3].trim(),
         timeStr: parts[4].trim(),
         seats: seats,
-        origin: null,
-        destination: null,
       );
     }
+
     return null;
   }
 
-  // ---------- 1) BEST PATH: resolve via booked_seats ----------
+  // ---------------------- Resolver 1: via booked_seats ----------------------
   Future<DocumentSnapshot<Map<String, dynamic>>?> _resolveViaBookedSeats(
       ParsedPayload p,
       String driverUid,
       ) async {
-    // Search student's booked seats for that date
-    final q = await _fs
+    final seatsForDay = await _fs
         .collection('booked_seats')
         .where('studentId', isEqualTo: p.studentId)
         .where('date', isEqualTo: p.dateStr)
         .get();
 
-    if (q.docs.isEmpty) return null;
+    if (seatsForDay.docs.isEmpty) return null;
 
-    // Prefer rows that match seat + route + time (loose 12/24h)
-    String? wantSeat = p.seats.isNotEmpty ? p.seats.first : null;
-    for (final d in q.docs) {
+    final wantSeat = p.seats.isNotEmpty ? p.seats.first : null;
+
+    // Try strict match: route + time + (seat)
+    for (final d in seatsForDay.docs) {
       final bs = d.data();
       final originOk = p.origin == null || _norm(bs['origin']) == _norm(p.origin);
       final destOk   = p.destination == null || _norm(bs['destination']) == _norm(p.destination);
@@ -166,105 +179,47 @@ class _DriverScanPageState extends State<DriverScanPage> {
       if (originOk && destOk && timeOk && seatOk) {
         final driverTripId = (bs['tripId'] ?? '').toString();
         if (driverTripId.isEmpty) continue;
-        final tripSnap = await _fs.collection('trips').doc(driverTripId).get();
+        final tripSnap = await _fs.collection('driver_trips').doc(driverTripId).get();
         if (tripSnap.exists && (tripSnap.data()?['driverId'] ?? '') == driverUid) {
           return tripSnap;
         }
       }
     }
 
-    // If strict match didn't work, return first driver-owned trip for that date
-    for (final d in q.docs) {
+    // Fallback: first driver-owned seat that day
+    for (final d in seatsForDay.docs) {
       final driverTripId = (d.data()['tripId'] ?? '').toString();
       if (driverTripId.isEmpty) continue;
-      final tripSnap = await _fs.collection('trips').doc(driverTripId).get();
+      final tripSnap = await _fs.collection('driver_trips').doc(driverTripId).get();
       if (tripSnap.exists && (tripSnap.data()?['driverId'] ?? '') == driverUid) {
         return tripSnap;
       }
     }
+
     return null;
   }
 
-  // ---------- 2) fallbacks from your previous resolver ----------
+  // ---------------------- Resolver 2: search driver_trips ----------------------
   Future<DocumentSnapshot<Map<String, dynamic>>?> _findTripAfterScan(
       ParsedPayload p,
       String driverUid,
       ) async {
-    final trips = _fs.collection('trips');
+    final trips = _fs.collection('driver_trips');
 
-    // Try A: direct by docId
+    // A) direct by docId
     final byId = await trips.doc(p.tripRefOrField).get();
-    if (byId.exists) {
-      final t = byId.data() ?? {};
-      final isThisDriver = (t['driverId'] ?? '').toString() == driverUid;
-      if (isThisDriver) return byId;
-
-      // Map student trip -> driver trip
-      final looksLikeStudent = t.containsKey('studentId') || t.containsKey('studentEmail') || t.containsKey('createdBy');
-      if (looksLikeStudent) {
-        final origin = _norm(t['origin']?.toString());
-        final dest   = _norm(t['destination']?.toString());
-        final date   = _fmtDate(t['date']);
-        final time   = _fmtTime(t['time'] ?? t['time12']);
-
-        final q = await trips
-            .where('driverId', isEqualTo: driverUid)
-            .where('origin', isEqualTo: t['origin'])
-            .where('destination', isEqualTo: t['destination'])
-            .get();
-
-        for (final d in q.docs) {
-          final dt = d.data();
-          if (_fmtDate(dt['date']) == date &&
-              _timeEqualLoose(_fmtTime(dt['time'] ?? dt['time12']), time) &&
-              _norm(dt['origin']?.toString()) == origin &&
-              _norm(dt['destination']?.toString()) == dest) {
-            return d;
-          }
-        }
-
-        final allForDriver = await trips.where('driverId', isEqualTo: driverUid).get();
-        for (final d in allForDriver.docs) {
-          final dt = d.data();
-          if (_fmtDate(dt['date']) == date &&
-              _timeEqualLoose(_fmtTime(dt['time'] ?? dt['time12']), time) &&
-              _norm(dt['origin']?.toString()) == origin &&
-              _norm(dt['destination']?.toString()) == dest) {
-            return d;
-          }
-        }
-      }
+    if (byId.exists && (byId.data()?['driverId'] ?? '') == driverUid) {
+      return byId;
     }
 
-    // Try B: trips.tripId == QR value
+    // B) by field tripId
     final byField = await trips.where('tripId', isEqualTo: p.tripRefOrField).limit(1).get();
     if (byField.docs.isNotEmpty) {
       final d = byField.docs.first;
-      final t = d.data();
-      if ((t['driverId'] ?? '').toString() == driverUid) return d;
-
-      if (t.containsKey('studentId') || t.containsKey('studentEmail') || t.containsKey('createdBy')) {
-        final origin = _norm(t['origin']?.toString());
-        final dest   = _norm(t['destination']?.toString());
-        final date   = _fmtDate(t['date']);
-        final time   = _fmtTime(t['time'] ?? t['time12']);
-
-        final allForDriver = await trips.where('driverId', isEqualTo: driverUid).get();
-        for (final m in allForDriver.docs) {
-          final mt = m.data();
-          if (_fmtDate(mt['date']) == date &&
-              _timeEqualLoose(_fmtTime(mt['time'] ?? mt['time12']), time) &&
-              _norm(mt['origin']?.toString()) == origin &&
-              _norm(mt['destination']?.toString()) == dest) {
-            return m;
-          }
-        }
-
-        if ((t['driverId'] ?? '').toString() == driverUid) return d;
-      }
+      if ((d.data()['driverId'] ?? '') == driverUid) return d;
     }
 
-    // Try C: by route/date/time from QR
+    // C) match on route/date/time
     final wantOrigin = _norm(p.origin);
     final wantDest   = _norm(p.destination);
     final wantDate   = p.dateStr;
@@ -285,13 +240,8 @@ class _DriverScanPageState extends State<DriverScanPage> {
 
     if (matches.isNotEmpty) return matches.first;
 
-    // Last resort: scan ALL trips (loose time compare) – prefer this driver
+    // D) last resort: scan ALL driver_trips
     final allTrips = await trips.get();
-    allTrips.docs.sort((a, b) {
-      final ad = (a.data()['driverId'] ?? '').toString() == driverUid ? 0 : 1;
-      final bd = (b.data()['driverId'] ?? '').toString() == driverUid ? 0 : 1;
-      return ad.compareTo(bd);
-    });
     for (final d in allTrips.docs) {
       final t = d.data();
       final dOrigin = _norm(t['origin']?.toString());
@@ -309,7 +259,7 @@ class _DriverScanPageState extends State<DriverScanPage> {
     return null;
   }
 
-  // ---------- mark seats boarded in /booked_seats ----------
+  // ---------------------- mark seats boarded in booked_seats ----------------------
   Future<void> _markSeatsBoarded({
     required String driverTripId,
     required String studentId,
@@ -324,7 +274,7 @@ class _DriverScanPageState extends State<DriverScanPage> {
           .get();
 
       if (q.docs.isEmpty) {
-        debugPrint('booked_seats not found for trip=$driverTripId student=$studentId seat=$seat');
+        debugPrint('booked_seats row not found: trip=$driverTripId student=$studentId seat=$seat');
         continue;
       }
 
@@ -337,7 +287,7 @@ class _DriverScanPageState extends State<DriverScanPage> {
     }
   }
 
-  // ---------- handle scan ----------
+  // ---------------------- handle scan ----------------------
   Future<void> _handleScan(String raw) async {
     if (_handling) return;
     setState(() {
@@ -353,11 +303,11 @@ class _DriverScanPageState extends State<DriverScanPage> {
       final parsed = _parsePayloadFlexible(raw);
       if (parsed == null) throw Exception('Invalid QR payload.');
 
-      // NEW: go to booked_seats first
+      // 1) best path: via booked_seats
       DocumentSnapshot<Map<String, dynamic>>? tripSnap =
       await _resolveViaBookedSeats(parsed, driver.uid);
 
-      // fallback to previous resolver if needed
+      // 2) fallback resolver
       tripSnap ??= await _findTripAfterScan(parsed, driver.uid);
 
       if (tripSnap == null || !tripSnap.exists) {
@@ -390,7 +340,7 @@ class _DriverScanPageState extends State<DriverScanPage> {
         SetOptions(merge: true),
       );
 
-      // /trips/{driverTrip}/scans/{student}
+      // /driver_trips/{trip}/scans/{student}
       batch.set(
         tripSnap.reference.collection('scans').doc(parsed.studentId),
         {
@@ -404,7 +354,7 @@ class _DriverScanPageState extends State<DriverScanPage> {
 
       await batch.commit();
 
-      // Mark seats so the schedule/seat page updates live
+      // mark seats so the driver seat page updates live
       final seatList = parsed.seats.isNotEmpty ? parsed.seats : ['?'];
       await _markSeatsBoarded(
         driverTripId: tripSnap.id,
@@ -431,7 +381,7 @@ class _DriverScanPageState extends State<DriverScanPage> {
     }
   }
 
-  // ---------- UI ----------
+  // ---------------------- UI ----------------------
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -478,15 +428,9 @@ class _DriverScanPageState extends State<DriverScanPage> {
             ),
           ),
           if (_lastSuccess != null)
-            Positioned(
-              left: 16, right: 16, bottom: 24,
-              child: _Banner(text: _lastSuccess!, ok: true),
-            ),
+            Positioned(left: 16, right: 16, bottom: 24, child: _Banner(text: _lastSuccess!, ok: true)),
           if (_lastError != null)
-            Positioned(
-              left: 16, right: 16, bottom: 24,
-              child: _Banner(text: _lastError!, ok: false),
-            ),
+            Positioned(left: 16, right: 16, bottom: 24, child: _Banner(text: _lastError!, ok: false)),
         ],
       ),
     );
@@ -506,10 +450,7 @@ class _Banner extends StatelessWidget {
       opacity: 1,
       child: Container(
         padding: const EdgeInsets.all(12),
-        decoration: BoxDecoration(
-          color: bg,
-          borderRadius: BorderRadius.circular(10),
-        ),
+        decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(10)),
         child: Text(text, style: const TextStyle(color: Colors.white), textAlign: TextAlign.center),
       ),
     );

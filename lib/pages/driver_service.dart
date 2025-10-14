@@ -25,20 +25,18 @@ class DriverService {
   /// Live stream of the current driver's profile document.
   Stream<DocumentSnapshot<Map<String, dynamic>>> driverStream() {
     final uid = _uid();
-    if (uid == null) {
-      // Return an empty stream if not signed in
-      return const Stream.empty();
-    }
+    if (uid == null) return const Stream.empty();
     return _fs.collection('drivers').doc(uid).snapshots();
   }
 
-  /// Update driver's info (used in EditDriverPage)
+  /// ✅ Add back this method (called in EditDriverPage)
   Future<void> updateDriver({
     String? name,
     String? phone,
   }) async {
     final uid = _uid();
     if (uid == null) throw Exception('Not signed in.');
+
     await _fs.collection('drivers').doc(uid).set({
       if (name != null) 'name': name,
       if (phone != null) 'phone': phone,
@@ -48,16 +46,15 @@ class DriverService {
 
   // ----------------- schedule / seats -----------------
 
-  /// ✅ Stream only THIS driver's trips for today (driver copies only)
+  /// ✅ Stream only THIS driver's trips for today (from driver_trips)
   Stream<QuerySnapshot<Map<String, dynamic>>> todayTrips() {
     final uid = _uid()!;
     final ymd = _todayYmd();
 
     return _fs
-        .collection('trips')
+        .collection('driver_trips')
         .where('driverId', isEqualTo: uid)
         .where('date', isEqualTo: ymd)
-        .where('role', isEqualTo: 'driver') // ✅ only driver trips
         .snapshots();
   }
 
@@ -70,8 +67,6 @@ class DriverService {
   }
 
   // ----------------- issue reporting -----------------
-
-  /// Report an issue (used in dashboard chips)
   Future<void> reportIssue({
     required String type,
     String? note,
@@ -79,6 +74,7 @@ class DriverService {
   }) async {
     final uid = _uid();
     if (uid == null) throw Exception('Not signed in.');
+
     await _fs.collection('issues').add({
       'type': type,
       'note': (note ?? '').trim(),
@@ -91,8 +87,6 @@ class DriverService {
   }
 
   // ----------------- leave requests -----------------
-
-  /// Submit a leave/MC request (used in LeaveRequestPage)
   Future<void> requestLeave({
     required DateTime from,
     required DateTime to,

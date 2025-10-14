@@ -29,6 +29,7 @@ class DriverSchedulePage extends StatelessWidget {
         foregroundColor: Colors.white,
       ),
       body: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+        // ✅ now reads from driver_trips via service
         stream: svc.todayTrips(),
         builder: (context, snap) {
           if (snap.hasError) {
@@ -48,14 +49,8 @@ class DriverSchedulePage extends StatelessWidget {
             return const Center(child: CircularProgressIndicator());
           }
 
-          // 🔎 Filter out student copies (those that have studentId / studentEmail)
-          final all = snap.data?.docs ?? [];
-          final trips = all.where((d) {
-            final t = d.data();
-            final looksStudent =
-                t.containsKey('studentId') || t.containsKey('studentEmail');
-            return !looksStudent; // keep only driver copies
-          }).toList();
+          // driver_trips contains only driver-owned docs (no student copies)
+          final trips = (snap.data?.docs ?? []).toList();
 
           if (trips.isEmpty) {
             return const Center(
@@ -95,9 +90,9 @@ class DriverSchedulePage extends StatelessWidget {
                   ),
                   subtitle: Text('$origin → $dest'),
 
-                  // live booked-seat count
+                  // live booked-seat count (booked_seats.tripId == driver_trips doc id)
                   trailing: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-                    stream: svc.seatsForTrip(tripId),
+                    stream: DriverService.instance.seatsForTrip(tripId),
                     builder: (context, seatSnap) {
                       if (!seatSnap.hasData) {
                         return const SizedBox(

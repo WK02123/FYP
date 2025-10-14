@@ -1,4 +1,3 @@
-// lib/pages/booking_qr_page.dart
 import 'dart:math' as math;
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -7,10 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 
 class BookingQrPage extends StatefulWidget {
-  /// /trips document id (or value stored in trips.tripId)
   final String tripId;
-
-  /// booked_seats document id for THIS seat
   final String seatDocId;
 
   const BookingQrPage({
@@ -39,8 +35,6 @@ class _BookingQrPageState extends State<BookingQrPage> {
     _loadAll();
   }
 
-  // ----------------------------- helpers -----------------------------
-
   String _fmtDate(dynamic v) {
     if (v == null) return '-';
     if (v is Timestamp) {
@@ -60,16 +54,18 @@ class _BookingQrPageState extends State<BookingQrPage> {
   }
 
   Future<DocumentSnapshot<Map<String, dynamic>>> _resolveTripDoc(String navId) async {
-    final byId = await _fs.collection('trips').doc(navId).get();
-    if (byId.exists) return byId;
+    var snap = await _fs.collection('driver_trips').doc(navId).get();
+    if (snap.exists) return snap;
 
-    final byField = await _fs.collection('trips').where('tripId', isEqualTo: navId).limit(1).get();
+    final byField = await _fs
+        .collection('driver_trips')
+        .where('tripId', isEqualTo: navId)
+        .limit(1)
+        .get();
     if (byField.docs.isNotEmpty) return byField.docs.first;
 
     throw Exception('Trip not found: $navId');
   }
-
-  // ------------------------------- load -------------------------------
 
   Future<void> _loadAll() async {
     try {
@@ -87,11 +83,9 @@ class _BookingQrPageState extends State<BookingQrPage> {
         return;
       }
 
-      // trip (whatever was passed in)
       final tripSnap = await _resolveTripDoc(widget.tripId);
       final t = tripSnap.data() ?? {};
 
-      // seat (the one user tapped in My Bookings)
       final seatSnap = await _fs.collection('booked_seats').doc(widget.seatDocId).get();
       if (!seatSnap.exists) {
         setState(() {
@@ -111,7 +105,6 @@ class _BookingQrPageState extends State<BookingQrPage> {
         return;
       }
 
-      // lock after driver scan?
       final tripIdCurrent = tripSnap.id;
       final top = await _fs.collection('boardings').doc('$tripIdCurrent|$uid').get();
       final nested = await tripSnap.reference.collection('scans').doc(uid).get();
@@ -125,52 +118,25 @@ class _BookingQrPageState extends State<BookingQrPage> {
         return;
       }
 
-      // --------------------- choose DRIVER trip id for QR ---------------------
-      // Priority:
-      // 1) Use booked_seats.tripId (should already point to the DRIVER trip)
-      // 2) Map by driverId + origin/dest + date/time
-      // 3) Fallback to the current trip doc id
       String effectiveTripId = (s['tripId'] ?? '').toString().trim();
-
       final origin = (t['origin'] ?? '').toString();
       final destination = (t['destination'] ?? '').toString();
       final date = _fmtDate(t['date']);
-      final time = _fmtTime(t['time'] ?? t['time12']);
+      final time = _fmtTime(t['time']);
       final seatName = (s['seatNumber'] ?? '').toString();
 
-      if (effectiveTripId.isEmpty) {
-        final driverId = (t['driverId'] ?? '').toString().trim();
-        if (driverId.isNotEmpty) {
-          final drv = await _fs
-              .collection('trips')
-              .where('driverId', isEqualTo: driverId)
-              .where('origin', isEqualTo: origin)
-              .where('destination', isEqualTo: destination)
-              .get();
-          String _d(dynamic v) => _fmtDate(v);
-          String _tm(dynamic v) => _fmtTime(v);
-          for (final d in drv.docs) {
-            final dt = d.data();
-            if (_d(dt['date']) == date && _tm(dt['time'] ?? dt['time12']) == time) {
-              effectiveTripId = d.id;
-              break;
-            }
-          }
-        }
-        if (effectiveTripId.isEmpty) {
-          effectiveTripId = tripSnap.id; // last resort
-        }
-      }
+      if (effectiveTripId.isEmpty) effectiveTripId = tripSnap.id;
 
+      // ✅ Correct 8-part payload format
       final payload = [
         'RIDEMATE',
-        effectiveTripId, // <<--- driver trip id for instant resolve
-        uid,
+        effectiveTripId, // driver_trip id
+        uid,              // student id
         origin,
         destination,
         date,
         time,
-        seatName, // only this seat
+        seatName,
       ].join('|');
 
       setState(() {
@@ -182,8 +148,6 @@ class _BookingQrPageState extends State<BookingQrPage> {
       setState(() => _error = e.toString());
     }
   }
-
-  // ------------------------ cancel this seat ------------------------
 
   Future<void> _cancelThisSeat() async {
     final user = FirebaseAuth.instance.currentUser;
@@ -206,17 +170,8 @@ class _BookingQrPageState extends State<BookingQrPage> {
 
     try {
       final tripRef = _trip!.reference;
-      final t = _trip!.data() ?? {};
-      final origin   = (t['origin'] ?? '').toString().trim();
-      final destination = (t['destination'] ?? '').toString().trim();
-      final date     = (t['date'] ?? '').toString().trim();                // "YYYY-MM-DD"
-      final timeRaw  = (t['time'] ?? t['time12'] ?? '').toString().trim(); // prefer "HH:mm"
-      final driverId = (t['driverId'] ?? '').toString().trim();
-
-      // 1) delete THIS seat document
       await _seat!.reference.delete();
 
-      // 2) does this student still have seats on THIS trip?
       final myRemainingSeats = await _fs
           .collection('booked_seats')
           .where('studentId', isEqualTo: user.uid)
@@ -225,7 +180,6 @@ class _BookingQrPageState extends State<BookingQrPage> {
           .get();
 
       if (myRemainingSeats.docs.isEmpty) {
-        // 2a) delete boardings for THIS student & trip
         final myBoardings = await _fs
             .collection('boardings')
             .where('tripId', isEqualTo: tripRef.id)
@@ -237,54 +191,14 @@ class _BookingQrPageState extends State<BookingQrPage> {
           await b.commit();
         }
 
-        // 2b) delete nested scans/* under the student's trip
-        final scans = await tripRef.collection('scans').get();
-        if (scans.docs.isNotEmpty) {
-          final b2 = _fs.batch();
-          for (final d in scans.docs) b2.delete(d.reference);
-          await b2.commit();
-        }
-
-        // 2c) delete the student's trip doc
-        try { await tripRef.delete(); } catch (_) {}
-
-        // 2d) ALSO delete the DRIVER-SIDE trip(s) for the same route/date/time
-        if (driverId.isNotEmpty) {
-          final driverTrips = await _fs
-              .collection('trips')
-              .where('driverId', isEqualTo: driverId)
-              .where('origin', isEqualTo: origin)
-              .where('destination', isEqualTo: destination)
-              .where('date', isEqualTo: date)
-              .where('time', isEqualTo: timeRaw)
-              .get();
-
-          for (final d in driverTrips.docs) {
-            final drvScans = await d.reference.collection('scans').get();
-            if (drvScans.docs.isNotEmpty) {
-              final b3 = _fs.batch();
-              for (final s in drvScans.docs) b3.delete(s.reference);
-              await b3.commit();
-            }
-            final drvBoardings = await _fs
-                .collection('boardings')
-                .where('tripId', isEqualTo: d.id)
-                .where('studentId', isEqualTo: user.uid)
-                .get();
-            if (drvBoardings.docs.isNotEmpty) {
-              final b4 = _fs.batch();
-              for (final b in drvBoardings.docs) b4.delete(b.reference);
-              await b4.commit();
-            }
-            try { await d.reference.delete(); } catch (_) {}
-          }
-        }
+        final scan = await tripRef.collection('scans').doc(user.uid).get();
+        if (scan.exists) await scan.reference.delete();
 
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Booking cancelled.')),
         );
-        Navigator.pop(context, true); // close page
+        Navigator.pop(context, true);
       } else {
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
@@ -301,8 +215,6 @@ class _BookingQrPageState extends State<BookingQrPage> {
       if (mounted) setState(() => _busy = false);
     }
   }
-
-  // -------------------------------- UI --------------------------------
 
   @override
   Widget build(BuildContext context) {
@@ -324,12 +236,11 @@ class _BookingQrPageState extends State<BookingQrPage> {
     final origin = (t['origin'] ?? '').toString();
     final destination = (t['destination'] ?? '').toString();
     final date = _fmtDate(t['date']);
-    final time = _fmtTime(t['time'] ?? t['time12']);
+    final time = _fmtTime(t['time']);
     final busCode = (t['busCode'] ?? '').toString();
     final status = (t['status'] ?? 'scheduled').toString();
     final seatLabel = (_seat?.data()?['seatNumber'] ?? '—').toString();
 
-    // lock screen (no cancel)
     if (_locked) {
       return Scaffold(
         appBar: appBar,
@@ -338,14 +249,7 @@ class _BookingQrPageState extends State<BookingQrPage> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              _TripHeaderCard(
-                origin: origin,
-                destination: destination,
-                date: date,
-                time: time,
-                busCode: busCode,
-                status: status,
-              ),
+              _TripHeaderCard(origin: origin, destination: destination, date: date, time: time, busCode: busCode, status: status),
               const SizedBox(height: 12),
               _SeatChip(seatLabel: seatLabel),
               const SizedBox(height: 16),
@@ -368,18 +272,10 @@ class _BookingQrPageState extends State<BookingQrPage> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              _TripHeaderCard(
-                origin: origin,
-                destination: destination,
-                date: date,
-                time: time,
-                busCode: busCode,
-                status: status,
-              ),
+              _TripHeaderCard(origin: origin, destination: destination, date: date, time: time, busCode: busCode, status: status),
               const SizedBox(height: 12),
               _SeatChip(seatLabel: seatLabel),
               const SizedBox(height: 16),
-              // QR card
               Container(
                 width: double.infinity,
                 padding: const EdgeInsets.all(20),
@@ -390,19 +286,11 @@ class _BookingQrPageState extends State<BookingQrPage> {
                 ),
                 child: Column(
                   children: [
-                    const Text(
-                      'Show this QR to the driver',
-                      style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16),
-                    ),
+                    const Text('Show this QR to the driver', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16)),
                     const SizedBox(height: 14),
                     _payload.isEmpty
                         ? const Icon(Icons.qr_code_2, size: 96, color: Colors.black26)
-                        : QrImageView(
-                      data: _payload,
-                      version: QrVersions.auto,
-                      backgroundColor: Colors.white,
-                      size: qrSize,
-                    ),
+                        : QrImageView(data: _payload, version: QrVersions.auto, backgroundColor: Colors.white, size: qrSize),
                     const SizedBox(height: 10),
                     TextButton.icon(
                       onPressed: _payload.isEmpty
@@ -416,22 +304,6 @@ class _BookingQrPageState extends State<BookingQrPage> {
                       icon: const Icon(Icons.copy),
                       label: const Text('Copy payload'),
                     ),
-                    const SizedBox(height: 6),
-                    // Collapsed payload preview
-                    Container(
-                      width: double.infinity,
-                      padding: const EdgeInsets.all(10),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFFF3F4F6),
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: Text(
-                        _payload.isEmpty ? '—' : _payload,
-                        style: const TextStyle(fontSize: 12, color: Colors.black54),
-                        overflow: TextOverflow.ellipsis,
-                        maxLines: 2,
-                      ),
-                    ),
                   ],
                 ),
               ),
@@ -439,7 +311,6 @@ class _BookingQrPageState extends State<BookingQrPage> {
           ),
         ),
       ),
-      // bottom fixed cancel button
       bottomNavigationBar: SafeArea(
         minimum: const EdgeInsets.fromLTRB(16, 10, 16, 16),
         child: _busy
@@ -460,8 +331,6 @@ class _BookingQrPageState extends State<BookingQrPage> {
     );
   }
 }
-
-// --------------------------- UI Pieces ---------------------------
 
 class _TripHeaderCard extends StatelessWidget {
   final String origin, destination, date, time, busCode, status;
@@ -540,10 +409,7 @@ class _SeatChip extends StatelessWidget {
             borderRadius: BorderRadius.circular(12),
             border: Border.all(color: const Color(0xFFDBEAFE)),
           ),
-          child: Text(
-            'Seat: $seatLabel',
-            style: const TextStyle(fontWeight: FontWeight.w700, letterSpacing: .2),
-          ),
+          child: Text('Seat: $seatLabel', style: const TextStyle(fontWeight: FontWeight.w700, letterSpacing: .2)),
         ),
       ],
     );
