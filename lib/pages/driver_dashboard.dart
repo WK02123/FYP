@@ -3,7 +3,8 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'driver_scan_page.dart';
 import 'driver_service.dart';
-import 'login_page.dart'; // 👈 redirect after logout
+import 'driver_schedule_page.dart';
+import 'login_page.dart';
 
 class DriverDashboard extends StatelessWidget {
   const DriverDashboard({super.key});
@@ -15,6 +16,19 @@ class DriverDashboard extends StatelessWidget {
       MaterialPageRoute(builder: (_) => const LoginPage()),
           (route) => false,
     );
+  }
+
+  String _prettyDate(String? ymd) {
+    if (ymd == null || ymd.isEmpty) return '--';
+    try {
+      final dt = DateTime.parse(ymd);
+      const months = [
+        'Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'
+      ];
+      return '${dt.day} ${months[dt.month - 1]} ${dt.year}';
+    } catch (_) {
+      return ymd;
+    }
   }
 
   @override
@@ -34,7 +48,6 @@ class DriverDashboard extends StatelessWidget {
             tooltip: 'Sign out',
             onPressed: () => _logout(context),
           ),
-          // inside DriverDashboard's AppBar actions:
           IconButton(
             tooltip: 'Scan QR',
             icon: const Icon(Icons.qr_code_scanner),
@@ -45,7 +58,6 @@ class DriverDashboard extends StatelessWidget {
               );
             },
           ),
-
         ],
       ),
       body: Padding(
@@ -62,15 +74,13 @@ class DriverDashboard extends StatelessWidget {
                   shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(16)),
                   child: ListTile(
-                    leading:
-                    const Icon(Icons.person, size: 40, color: Colors.red),
+                    leading: const Icon(Icons.person, size: 40, color: Colors.red),
                     title: Text(name),
                     subtitle: Text('Bus: ${data['busCode'] ?? '-'}'),
                     trailing: Text(
                       status == 'online' ? 'Online' : 'Offline',
                       style: TextStyle(
-                        color:
-                        status == 'online' ? Colors.green : Colors.grey,
+                        color: status == 'online' ? Colors.green : Colors.grey,
                         fontWeight: FontWeight.bold,
                       ),
                     ),
@@ -80,7 +90,6 @@ class DriverDashboard extends StatelessWidget {
             ),
             const SizedBox(height: 16),
 
-            // Report Issue row
             Align(
               alignment: Alignment.centerLeft,
               child: Text("Report Issue",
@@ -99,28 +108,45 @@ class DriverDashboard extends StatelessWidget {
             ),
             const SizedBox(height: 20),
 
-            // Today next trip
+            // ✅ Next trip card with client-side filter
             Expanded(
               child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
                 stream: svc.todayTrips(),
                 builder: (context, snap) {
-                  final docs = snap.data?.docs ?? [];
-                  if (docs.isEmpty) {
-                    return const _EmptyCard(
-                        text: "No trips scheduled for today");
+                  if (snap.hasError) {
+                    return const _EmptyCard(text: "Error loading trips");
                   }
-                  final next = docs.first.data();
+                  if (!snap.hasData) {
+                    return const Center(child: CircularProgressIndicator());
+                  }
+
+                  final uid = FirebaseAuth.instance.currentUser!.uid;
+                  final all = snap.data!.docs;
+                  final driverDocs = all.where((d) => d.id.startsWith(uid)).toList();
+
+                  if (driverDocs.isEmpty) {
+                    return const _EmptyCard(text: "No trips scheduled for today");
+                  }
+
+                  final next = driverDocs.first.data();
+                  final dateStr = _prettyDate(next['date']?.toString());
+                  final timeStr = next['time']?.toString() ?? '--:--';
+                  final origin = next['origin'] ?? '-';
+                  final dest = next['destination'] ?? '-';
+
                   return Card(
                     elevation: 2,
                     shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(16)),
                     child: ListTile(
-                      title: Text(
-                          '${next['time']}  —  ${next['origin']} → ${next['destination']}'),
-                      subtitle: const Text('Schedule on time'),
-                      trailing: const Icon(Icons.qr_code, size: 36),
+                      title: Text('$dateStr • $timeStr'),
+                      subtitle: Text('$origin → $dest'),
+                      trailing: const Icon(Icons.chevron_right, size: 28),
                       onTap: () {
-                        // TODO: open QR Scanner if needed
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(builder: (_) => const DriverSchedulePage()),
+                        );
                       },
                     ),
                   );
@@ -185,23 +211,16 @@ class _IssueDialogState extends State<_IssueDialog> {
         ),
       ),
       actions: [
-        TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel')),
+        TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
         ElevatedButton(
-          onPressed: _sending
-              ? null
-              : () async {
+          onPressed: _sending ? null : () async {
             setState(() => _sending = true);
             Navigator.pop(context, _c.text.trim());
           },
           style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
           child: _sending
-              ? const SizedBox(
-              height: 16,
-              width: 16,
-              child: CircularProgressIndicator(
-                  strokeWidth: 2, color: Colors.white))
+              ? const SizedBox(height: 16, width: 16,
+              child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
               : const Text('Send'),
         )
       ],
@@ -217,10 +236,11 @@ class _EmptyCard extends StatelessWidget {
     return Card(
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       child: Center(
-          child: Padding(
-            padding: const EdgeInsets.all(24.0),
-            child: Text(text, style: const TextStyle(color: Colors.grey)),
-          )),
+        child: Padding(
+          padding: const EdgeInsets.all(24.0),
+          child: Text(text, style: const TextStyle(color: Colors.grey)),
+        ),
+      ),
     );
   }
 }

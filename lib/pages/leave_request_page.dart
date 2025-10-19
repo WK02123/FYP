@@ -86,17 +86,25 @@ class _LeaveRequestPageState extends State<LeaveRequestPage> {
                   return;
                 }
                 setState(() => _sending = true);
-                await DriverService.instance.requestLeave(
-                  from: DateTime(_from!.year, _from!.month, _from!.day, 0, 0),
-                  to: DateTime(_to!.year, _to!.month, _to!.day, 23, 59),
-                  reason: _reason.text.trim().isEmpty ? 'N/A' : _reason.text.trim(),
-                );
-                if (!mounted) return;
-                setState(() => _sending = false);
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Leave request sent')),
-                );
-                Navigator.pop(context);
+                try {
+                  await DriverService.instance.requestLeave(
+                    from: DateTime(_from!.year, _from!.month, _from!.day, 0, 0),
+                    to: DateTime(_to!.year, _to!.month, _to!.day, 23, 59),
+                    reason: _reason.text.trim().isEmpty ? 'N/A' : _reason.text.trim(),
+                  );
+                  if (!mounted) return;
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Leave request sent')),
+                  );
+                  Navigator.pop(context);
+                } catch (e) {
+                  if (!mounted) return;
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('Failed: $e')),
+                  );
+                } finally {
+                  if (mounted) setState(() => _sending = false);
+                }
               },
               style: ElevatedButton.styleFrom(
                 backgroundColor: Colors.red,

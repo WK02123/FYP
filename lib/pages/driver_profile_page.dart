@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'driver_service.dart';
 import 'edit_driver_page.dart';
 import 'leave_request_page.dart';
@@ -22,10 +23,19 @@ class DriverProfilePage extends StatelessWidget {
         padding: const EdgeInsets.all(16),
         child: Column(
           children: [
-            StreamBuilder(
+            // ✅ Typed StreamBuilder so snap.data is a DocumentSnapshot<Map<...>>
+            StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
               stream: svc.driverStream(),
               builder: (context, snap) {
-                final data = (snap.data?.data() as Map<String, dynamic>?) ?? {};
+                if (snap.connectionState == ConnectionState.waiting) {
+                  return const Card(
+                    child: ListTile(
+                      title: Text('Loading...'),
+                      subtitle: Text('Please wait'),
+                    ),
+                  );
+                }
+                final data = snap.data?.data() ?? <String, dynamic>{};
                 return Card(
                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
                   child: ListTile(
@@ -36,8 +46,8 @@ class DriverProfilePage extends StatelessWidget {
                     onTap: () {
                       Navigator.push(context, MaterialPageRoute(
                         builder: (_) => EditDriverPage(
-                          name: data['name'] ?? '',
-                          phone: data['phone'] ?? '',
+                          name: data['name']?.toString() ?? '',
+                          phone: data['phone']?.toString() ?? '',
                         ),
                       ));
                     },
@@ -63,7 +73,7 @@ class DriverProfilePage extends StatelessWidget {
             ElevatedButton(
               onPressed: () async {
                 await FirebaseAuth.instance.signOut();
-                Navigator.of(context).pop();
+                if (context.mounted) Navigator.of(context).pop();
               },
               style: ElevatedButton.styleFrom(
                 backgroundColor: Colors.red,

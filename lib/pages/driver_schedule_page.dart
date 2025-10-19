@@ -1,9 +1,22 @@
 import 'package:flutter/material.dart';
-import 'driver_service.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+
+import 'driver_service.dart';
+import 'driver_trip_seats_page.dart';
 
 class DriverSchedulePage extends StatelessWidget {
   const DriverSchedulePage({super.key});
+
+  String _prettyDate(String? ymd) {
+    if (ymd == null || ymd.isEmpty) return '--';
+    try {
+      final dt = DateTime.parse(ymd);
+      const m = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+      return '${dt.day} ${m[dt.month - 1]} ${dt.year}';
+    } catch (_) {
+      return ymd;
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -16,9 +29,9 @@ class DriverSchedulePage extends StatelessWidget {
         foregroundColor: Colors.white,
       ),
       body: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+        // ✅ now reads from driver_trips via service
         stream: svc.todayTrips(),
         builder: (context, snap) {
-          // 🔹 Show error if query/index/rules fail
           if (snap.hasError) {
             return Center(
               child: Padding(
@@ -32,13 +45,13 @@ class DriverSchedulePage extends StatelessWidget {
             );
           }
 
-          // 🔹 Loading indicator
           if (snap.connectionState == ConnectionState.waiting) {
             return const Center(child: CircularProgressIndicator());
           }
 
-          // 🔹 Show trips
-          final trips = snap.data?.docs ?? [];
+          // driver_trips contains only driver-owned docs (no student copies)
+          final trips = (snap.data?.docs ?? []).toList();
+
           if (trips.isEmpty) {
             return const Center(
               child: Text(
@@ -53,7 +66,15 @@ class DriverSchedulePage extends StatelessWidget {
             itemCount: trips.length,
             separatorBuilder: (_, __) => const SizedBox(height: 8),
             itemBuilder: (context, i) {
-              final t = trips[i].data();
+              final doc = trips[i];
+              final t = doc.data();
+              final tripId = doc.id;
+
+              final dateStr = _prettyDate(t['date']?.toString());
+              final timeStr = (t['time'] ?? t['time12'] ?? '--:--').toString();
+              final origin = (t['origin'] ?? '-').toString();
+              final dest = (t['destination'] ?? '-').toString();
+
               return Card(
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(16),
@@ -64,16 +85,50 @@ class DriverSchedulePage extends StatelessWidget {
                     child: const Icon(Icons.access_time, color: Colors.red),
                   ),
                   title: Text(
-                    t['time']?.toString() ?? '--:--',
+                    '$dateStr • $timeStr',
                     style: const TextStyle(fontWeight: FontWeight.bold),
                   ),
-                  subtitle: Text(
-                    '${t['origin'] ?? '-'} → ${t['destination'] ?? '-'}',
+                  subtitle: Text('$origin → $dest'),
+
+                  // live booked-seat count (booked_seats.tripId == driver_trips doc id)
+                  trailing: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+                    stream: DriverService.instance.seatsForTrip(tripId),
+                    builder: (context, seatSnap) {
+                      if (!seatSnap.hasData) {
+                        return const SizedBox(
+                          width: 28,
+                          height: 28,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        );
+                      }
+                      final count = seatSnap.data!.docs.length;
+                      return Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: Colors.red.shade50,
+                          borderRadius: BorderRadius.circular(999),
+                          border: Border.all(color: Colors.red.shade100),
+                        ),
+                        child: Text(
+                          '$count booked',
+                          style: const TextStyle(
+                            color: Colors.red,
+                            fontWeight: FontWeight.w600,
+                            fontSize: 12,
+                          ),
+                        ),
+                      );
+                    },
                   ),
-                  trailing: Text(
-                    t['status']?.toString() ?? 'scheduled',
-                    style: const TextStyle(fontSize: 12, color: Colors.grey),
-                  ),
+
+                  onTap: () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => DriverTripSeatsPage(tripId: tripId, trip: t),
+                      ),
+                    );
+                  },
                 ),
               );
             },

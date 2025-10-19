@@ -12,15 +12,46 @@ class EditDriverPage extends StatefulWidget {
 
 class _EditDriverPageState extends State<EditDriverPage> {
   final _form = GlobalKey<FormState>();
-  late final _name = TextEditingController(text: widget.name);
-  late final _phone = TextEditingController(text: widget.phone);
+  late final TextEditingController _name;
+  late final TextEditingController _phone;
   bool _saving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // ✅ init here (you cannot use `widget` in field initializers)
+    _name  = TextEditingController(text: widget.name);
+    _phone = TextEditingController(text: widget.phone);
+  }
 
   @override
   void dispose() {
     _name.dispose();
     _phone.dispose();
     super.dispose();
+  }
+
+  Future<void> _save() async {
+    if (!_form.currentState!.validate()) return;
+    setState(() => _saving = true);
+    try {
+      await DriverService.instance.updateDriver(
+        name: _name.text.trim(),
+        phone: _phone.text.trim(),
+      );
+      if (!mounted) return;
+      Navigator.pop(context);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Profile updated')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed: $e')),
+      );
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
   }
 
   @override
@@ -39,30 +70,29 @@ class _EditDriverPageState extends State<EditDriverPage> {
             children: [
               TextFormField(
                 controller: _name,
-                decoration: const InputDecoration(labelText: 'Full Name', border: OutlineInputBorder()),
-                validator: (v) => (v == null || v.trim().isEmpty) ? 'Enter name' : null,
+                decoration: const InputDecoration(
+                  labelText: 'Full Name',
+                  border: OutlineInputBorder(),
+                ),
+                validator: (v) =>
+                (v == null || v.trim().isEmpty) ? 'Enter name' : null,
               ),
               const SizedBox(height: 12),
               TextFormField(
                 controller: _phone,
-                decoration: const InputDecoration(labelText: 'Phone', border: OutlineInputBorder()),
+                decoration: const InputDecoration(
+                  labelText: 'Phone',
+                  border: OutlineInputBorder(),
+                ),
                 keyboardType: TextInputType.phone,
-                validator: (v) => (v == null || v.trim().isEmpty) ? 'Enter phone' : null,
+                validator: (v) =>
+                (v == null || v.trim().isEmpty) ? 'Enter phone' : null,
               ),
               const SizedBox(height: 20),
               _saving
                   ? const CircularProgressIndicator()
                   : ElevatedButton(
-                onPressed: () async {
-                  if (!_form.currentState!.validate()) return;
-                  setState(() => _saving = true);
-                  await DriverService.instance.updateDriver(
-                    name: _name.text.trim(),
-                    phone: _phone.text.trim(),
-                  );
-                  if (!mounted) return;
-                  Navigator.pop(context);
-                },
+                onPressed: _save,
                 style: ElevatedButton.styleFrom(
                   backgroundColor: Colors.red,
                   minimumSize: const Size.fromHeight(48),
