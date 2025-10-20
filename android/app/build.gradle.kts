@@ -1,35 +1,37 @@
 plugins {
     id("com.android.application")
-    id("kotlin-android")
-    id("com.google.gms.google-services") // ✅ Firebase plugin
-    id("dev.flutter.flutter-gradle-plugin") // Flutter plugin must come last
+    id("org.jetbrains.kotlin.android")
+    id("com.google.gms.google-services")
+    id("dev.flutter.flutter-gradle-plugin")
 }
 
 android {
     namespace = "inti.edu.shuttle_bus_app"
-    compileSdk = flutter.compileSdkVersion
+
+    compileSdk = 36
     ndkVersion = "27.0.12077973"
 
+    defaultConfig {
+        applicationId = "inti.edu.shuttle_bus_app"
+        minSdk = 23
+        targetSdk = 36
+        versionCode = flutter.versionCode
+        versionName = flutter.versionName
+        multiDexEnabled = true
+    }
+
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_11
-        targetCompatibility = JavaVersion.VERSION_11
+        isCoreLibraryDesugaringEnabled = true
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
     }
 
     kotlinOptions {
-        jvmTarget = JavaVersion.VERSION_11.toString()
-    }
-
-    defaultConfig {
-        applicationId = "inti.edu.shuttle_bus_app" // ✅ Must match Firebase package
-        minSdk = 21                                // <- FIXED (remove Groovy style)
-        targetSdk = flutter.targetSdkVersion
-        versionCode = flutter.versionCode
-        versionName = flutter.versionName
+        jvmTarget = "17"
     }
 
     buildTypes {
         release {
-            // TODO: replace with release signingConfig when you have one
             signingConfig = signingConfigs.getByName("debug")
         }
     }
@@ -42,4 +44,20 @@ flutter {
 dependencies {
     implementation(platform("com.google.firebase:firebase-bom:32.3.1"))
     implementation("com.google.firebase:firebase-auth")
+    implementation("androidx.appcompat:appcompat:1.6.1")
+    implementation("androidx.multidex:multidex:2.0.1")
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
+}
+
+// Copy APK to Flutter's expected location after evaluation
+afterEvaluate {
+    tasks.register<Copy>("copyFlutterApk") {
+        from(layout.buildDirectory.dir("outputs/apk/debug"))
+        into(layout.projectDirectory.dir("../../build/app/outputs/flutter-apk"))
+        include("*.apk")
+    }
+
+    tasks.named("assembleDebug").configure {
+        finalizedBy("copyFlutterApk")
+    }
 }
