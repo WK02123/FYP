@@ -7,6 +7,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:qr_flutter/qr_flutter.dart';
+import 'notification_service.dart';
 
 class BookingQrPage extends StatefulWidget {
   final String tripId;
@@ -460,8 +461,26 @@ class _BookingQrPageState extends State<BookingQrPage> {
         }
       }
 
+
+      // 2) Delete seat
       // 2) Delete seat
       await _seat!.reference.delete();
+
+// 2.5) DELETE SCHEDULED NOTIFICATION using service
+      try {
+        debugPrint('🗑️ Deleting scheduled notification...');
+
+        final notificationId = NotificationService.buildNotificationId(
+          userId: user.uid,
+          scheduleId: widget.tripId,
+          date: dateStr,
+        );
+
+        await NotificationService().deleteScheduledNotification(notificationId);
+      } catch (e) {
+        debugPrint('❌ Error deleting scheduled notification: $e');
+      }
+
 
       // 3) Send cancellation email
       try {

@@ -103,6 +103,32 @@ class _BookingConfirmationPageState extends State<BookingConfirmationPage> {
     return '${h.toString().padLeft(2, '0')}:${m.toString().padLeft(2, '0')}';
   }
 
+  /// Parse date and time to get full DateTime for departure
+  DateTime? _parseDepartureDateTime(String date, String time) {
+    try {
+      // Parse date: "2025-10-21"
+      final dateParts = date.split('-');
+      if (dateParts.length != 3) return null;
+
+      final year = int.parse(dateParts[0]);
+      final month = int.parse(dateParts[1]);
+      final day = int.parse(dateParts[2]);
+
+      // Convert time to 24h format: "3:00 PM" -> "15:00"
+      final time24 = _to24h(time);
+      final timeParts = time24.split(':');
+      if (timeParts.length != 2) return null;
+
+      final hour = int.parse(timeParts[0]);
+      final minute = int.parse(timeParts[1]);
+
+      return DateTime(year, month, day, hour, minute);
+    } catch (e) {
+      debugPrint('❌ Error parsing datetime: $e');
+      return null;
+    }
+  }
+
   Future<String> _ensureTrips() async {
     final user = FirebaseAuth.instance.currentUser!;
     final fs = FirebaseFirestore.instance;
@@ -292,10 +318,10 @@ class _BookingConfirmationPageState extends State<BookingConfirmationPage> {
 
       await batch.commit();
 
-      // 👇 SEND BOOKING CONFIRMATION EMAIL
+      // ✉️ SEND BOOKING CONFIRMATION EMAIL
       try {
         final totalRm = (totalSen / 100).toStringAsFixed(2);
-        debugPrint('🔵 Sending booking email to: $_email');
+        debugPrint('📧 Sending booking email to: $_email');
 
         final emailFun = FirebaseFunctions.instanceFor(region: 'asia-southeast1')
             .httpsCallable('sendBookingEmail');
@@ -314,13 +340,65 @@ class _BookingConfirmationPageState extends State<BookingConfirmationPage> {
         debugPrint('✅ Booking email sent successfully');
       } catch (e) {
         debugPrint('❌ Email sending failed: $e');
-        // Don't fail the booking if email fails
+      }
+
+      // 🔔 SCHEDULE NOTIFICATION FOR 30 MINUTES BEFORE TRIP
+      try {
+        debugPrint('📱 Scheduling trip reminder...');
+
+        final departureDateTime = _parseDepartureDateTime(widget.date, widget.time);
+
+        if (departureDateTime != null) {
+          final reminderTime = departureDateTime.subtract(const Duration(minutes: 30));
+          final now = DateTime.now();
+
+          if (reminderTime.isAfter(now)) {
+            await FirebaseFirestore.instance
+                .collection('scheduled_notifications')
+                .doc('${user.uid}_${widget.scheduleId}_${widget.date}')
+                .set({
+              'userId': user.uid,
+              'origin': widget.origin,
+              'destination': widget.destination,
+              'date': widget.date,
+              'time': widget.time,
+              'departureDateTime': Timestamp.fromDate(departureDateTime),
+              'reminderTime': Timestamp.fromDate(reminderTime),
+              'status': 'scheduled',
+              'type': 'trip_reminder',
+              'isDriver': false,
+              'createdAt': FieldValue.serverTimestamp(),
+            });
+
+            debugPrint('✅ Reminder scheduled for: $reminderTime (30 min before)');
+            debugPrint('   Trip departs at: $departureDateTime');
+          } else {
+            debugPrint('⚠️ Trip is too soon (less than 30 min), sending immediate notification');
+
+            final notifFun = FirebaseFunctions.instanceFor(region: 'asia-southeast1')
+                .httpsCallable('sendTripReminder');
+
+            await notifFun.call({
+              'userId': user.uid,
+              'origin': widget.origin,
+              'destination': widget.destination,
+              'time': widget.time,
+              'isDriver': false,
+            });
+          }
+        } else {
+          debugPrint('⚠️ Could not parse departure date/time');
+        }
+      } catch (e) {
+        debugPrint('❌ Notification scheduling failed: $e');
       }
 
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-            content: Text('✅ Payment successful & booking confirmed! Check your email.')),
+          content: Text('✅ Payment successful & booking confirmed! Check your email.'),
+          duration: Duration(seconds: 3),
+        ),
       );
 
       Navigator.of(context).pushAndRemoveUntil(
@@ -333,8 +411,7 @@ class _BookingConfirmationPageState extends State<BookingConfirmationPage> {
       );
     } on FirebaseFunctionsException catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-            content: Text('Cloud Function error: ${e.code} ${e.message}')),
+        SnackBar(content: Text('Cloud Function error: ${e.code} ${e.message}')),
       );
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -361,8 +438,7 @@ class _BookingConfirmationPageState extends State<BookingConfirmationPage> {
         padding: const EdgeInsets.all(16),
         children: [
           Card(
-            shape:
-            RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
             child: ListTile(
               leading: const CircleAvatar(
                 backgroundColor: Color(0x33D32F2F),
@@ -371,55 +447,56 @@ class _BookingConfirmationPageState extends State<BookingConfirmationPage> {
               title: Text('${widget.origin}  →  ${widget.destination}'),
               subtitle: Text('${widget.date} • ${widget.time}'),
               trailing: Container(
-                padding:
-                const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                 decoration: BoxDecoration(
                   color: Colors.green.withOpacity(.1),
                   borderRadius: BorderRadius.circular(12),
                 ),
-                child: const Text('scheduled',
-                    style: TextStyle(color: Colors.green)),
+                child: const Text('scheduled', style: TextStyle(color: Colors.green)),
               ),
             ),
           ),
           const SizedBox(height: 12),
-          Text('Your information',
-              style: Theme.of(context).textTheme.titleMedium),
+          Text('Your information', style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 8),
           Card(
-            shape:
-            RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
             child: Column(
               children: [
                 ListTile(
-                    leading: const Icon(Icons.person),
-                    title: Text(_name.isEmpty ? '—' : _name)),
+                  leading: const Icon(Icons.person),
+                  title: Text(_name.isEmpty ? '—' : _name),
+                ),
                 const Divider(height: 1),
                 ListTile(
-                    leading: const Icon(Icons.email_outlined),
-                    title: Text(_email.isEmpty ? '—' : _email)),
+                  leading: const Icon(Icons.email_outlined),
+                  title: Text(_email.isEmpty ? '—' : _email),
+                ),
                 const Divider(height: 1),
                 ListTile(
-                    leading: const Icon(Icons.phone_outlined),
-                    title: Text(_phone.isEmpty ? '—' : _phone)),
+                  leading: const Icon(Icons.phone_outlined),
+                  title: Text(_phone.isEmpty ? '—' : _phone),
+                ),
               ],
             ),
           ),
           const SizedBox(height: 12),
           Card(
-            shape:
-            RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
             child: Column(
               children: [
                 ListTile(
-                    leading: const Icon(Icons.event_seat),
-                    title: Text('Seats: $seatsText')),
+                  leading: const Icon(Icons.event_seat),
+                  title: Text('Seats: $seatsText'),
+                ),
                 const Divider(height: 1),
                 ListTile(
                   leading: const Icon(Icons.payments_outlined),
                   title: const Text('Total'),
-                  trailing: Text('RM $totalRm',
-                      style: const TextStyle(fontWeight: FontWeight.bold)),
+                  trailing: Text(
+                    'RM $totalRm',
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
                 ),
               ],
             ),
@@ -429,13 +506,22 @@ class _BookingConfirmationPageState extends State<BookingConfirmationPage> {
               ? const Center(child: CircularProgressIndicator())
               : ElevatedButton.icon(
             onPressed: _payAndConfirm,
-            icon: const Icon(Icons.lock),
-            label: const Text('Pay & Confirm'),
+            icon: const Icon(Icons.lock, color: Colors.white),
+            label: const Text(
+              'Pay & Confirm',
+              style: TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.bold,
+                color: Colors.white,
+              ),
+            ),
             style: ElevatedButton.styleFrom(
               backgroundColor: const Color(0xFFD32F2F),
+              foregroundColor: Colors.white,
               minimumSize: const Size.fromHeight(52),
               shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(14)),
+                borderRadius: BorderRadius.circular(14),
+              ),
             ),
           ),
         ],

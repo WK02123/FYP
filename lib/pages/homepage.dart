@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:cloud_firestore/cloud_firestore.dart'; // ✅ for route check
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:shuttle_bus_app/pages/date_picker_page.dart';
 import 'package:shuttle_bus_app/pages/location_search_page.dart';
 import 'package:shuttle_bus_app/pages/schedule_page.dart';
@@ -65,9 +65,11 @@ class _HomePageState extends State<HomePage> {
       appBar: AppBar(
         backgroundColor: const Color(0xFFD32F2F),
         elevation: 0,
+        title: const Text('Ridemate'),
         actions: [
           IconButton(
             icon: const Icon(Icons.logout, color: Colors.white),
+            tooltip: 'Logout',
             onPressed: () async {
               await FirebaseAuth.instance.signOut();
               if (!mounted) return;
@@ -82,7 +84,7 @@ class _HomePageState extends State<HomePage> {
       body: _selectedIndex == 0
           ? _buildMainContent()
           : _selectedIndex == 1
-          ? const GpsMapPage() // middle tab = GPS
+          ? const GpsMapPage()
           : _buildProfilePage(),
       bottomNavigationBar: BottomNavigationBar(
         currentIndex: _selectedIndex,
@@ -94,7 +96,7 @@ class _HomePageState extends State<HomePage> {
         },
         items: const [
           BottomNavigationBarItem(icon: Icon(Icons.home), label: ''),
-          BottomNavigationBarItem(icon: Icon(Icons.my_location), label: ''), // GPS
+          BottomNavigationBarItem(icon: Icon(Icons.my_location), label: ''),
           BottomNavigationBarItem(icon: Icon(Icons.person), label: ''),
         ],
       ),
@@ -164,7 +166,6 @@ class _HomePageState extends State<HomePage> {
                       ),
                     );
                     if (result != null) {
-                      // If origin changes, clear destination (to avoid mismatch)
                       setState(() {
                         selectedOrigin = result as String;
                         selectedDestination = null;
@@ -174,7 +175,7 @@ class _HomePageState extends State<HomePage> {
                 ),
                 const SizedBox(height: 10),
 
-                // Destination picker (filters by selected origin)
+                // Destination picker
                 _buildTextField(
                   context,
                   "Destination",
@@ -192,7 +193,7 @@ class _HomePageState extends State<HomePage> {
                       MaterialPageRoute(
                         builder: (_) => LocationSearchPage(
                           title: 'Search Destination',
-                          originFilter: selectedOrigin, // ✅ filter destinations by origin
+                          originFilter: selectedOrigin,
                         ),
                       ),
                     );
@@ -220,9 +221,10 @@ class _HomePageState extends State<HomePage> {
 
                 const SizedBox(height: 20),
                 ElevatedButton(
-                  onPressed: _goScheduleIfRouteExists, // ✅ verify route exists
+                  onPressed: _goScheduleIfRouteExists,
                   style: ElevatedButton.styleFrom(
                     backgroundColor: Colors.red,
+                    foregroundColor: Colors.white,
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(20),
                     ),
