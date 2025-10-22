@@ -1,3 +1,4 @@
+// lib/pages/driver_dashboard.dart
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -90,25 +91,7 @@ class DriverDashboard extends StatelessWidget {
             ),
             const SizedBox(height: 16),
 
-            Align(
-              alignment: Alignment.centerLeft,
-              child: Text("Report Issue",
-                  style: Theme.of(context).textTheme.titleMedium),
-            ),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 14,
-              runSpacing: 10,
-              children: const [
-                _IssueChip(label: 'Accident', icon: Icons.car_crash),
-                _IssueChip(label: 'Delay', icon: Icons.schedule),
-                _IssueChip(label: 'Mechanical', icon: Icons.build),
-                _IssueChip(label: 'Emergency', icon: Icons.warning_amber),
-              ],
-            ),
-            const SizedBox(height: 20),
-
-            // ✅ Next trip card with client-side filter
+            // We will render "Report Issue" _below_ the nearest trip card
             Expanded(
               child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
                 stream: svc.todayTrips(),
@@ -122,33 +105,84 @@ class DriverDashboard extends StatelessWidget {
 
                   final uid = FirebaseAuth.instance.currentUser!.uid;
                   final all = snap.data!.docs;
+                  // filter to only keys starting with this driver (if your IDs are prefixed),
+                  // otherwise simply use .orderBy('time') result from query and take the first doc.
                   final driverDocs = all.where((d) => d.id.startsWith(uid)).toList();
+                  final docs = driverDocs.isEmpty ? all : driverDocs;
 
-                  if (driverDocs.isEmpty) {
+                  if (docs.isEmpty) {
                     return const _EmptyCard(text: "No trips scheduled for today");
                   }
 
-                  final next = driverDocs.first.data();
-                  final dateStr = _prettyDate(next['date']?.toString());
-                  final timeStr = next['time']?.toString() ?? '--:--';
-                  final origin = next['origin'] ?? '-';
-                  final dest = next['destination'] ?? '-';
+                  // Nearest/first trip for today
+                  final nextDoc = docs.first;
+                  final next = nextDoc.data();
+                  final dateRaw = next['date']?.toString() ?? '';
+                  final timeRaw = next['time']?.toString() ?? '';
+                  final dateStr = _prettyDate(dateRaw);
+                  final origin = next['origin']?.toString() ?? '-';
+                  final dest = next['destination']?.toString() ?? '-';
 
-                  return Card(
-                    elevation: 2,
-                    shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(16)),
-                    child: ListTile(
-                      title: Text('$dateStr • $timeStr'),
-                      subtitle: Text('$origin → $dest'),
-                      trailing: const Icon(Icons.chevron_right, size: 28),
-                      onTap: () {
-                        Navigator.push(
-                          context,
-                          MaterialPageRoute(builder: (_) => const DriverSchedulePage()),
-                        );
-                      },
-                    ),
+                  return ListView(
+                    children: [
+                      Card(
+                        elevation: 2,
+                        shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(16)),
+                        child: ListTile(
+                          title: Text('$dateStr • ${timeRaw.isEmpty ? "--:--" : timeRaw}'),
+                          subtitle: Text('$origin → $dest'),
+                          trailing: const Icon(Icons.chevron_right, size: 28),
+                          onTap: () {
+                            Navigator.push(
+                              context,
+                              MaterialPageRoute(builder: (_) => const DriverSchedulePage()),
+                            );
+                          },
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      Text("Report Issue", style: Theme.of(context).textTheme.titleMedium),
+                      const SizedBox(height: 8),
+                      Wrap(
+                        spacing: 14,
+                        runSpacing: 10,
+                        children: [
+                          _IssueChip2(
+                            label: 'Delay',
+                            icon: Icons.schedule,
+                            origin: origin,
+                            destination: dest,
+                            date: dateRaw,
+                            time: timeRaw,
+                          ),
+                          _IssueChip2(
+                            label: 'Accident',
+                            icon: Icons.car_crash,
+                            origin: origin,
+                            destination: dest,
+                            date: dateRaw,
+                            time: timeRaw,
+                          ),
+                          _IssueChip2(
+                            label: 'Mechanical',
+                            icon: Icons.build,
+                            origin: origin,
+                            destination: dest,
+                            date: dateRaw,
+                            time: timeRaw,
+                          ),
+                          _IssueChip2(
+                            label: 'Emergency',
+                            icon: Icons.warning_amber,
+                            origin: origin,
+                            destination: dest,
+                            date: dateRaw,
+                            time: timeRaw,
+                          ),
+                        ],
+                      ),
+                    ],
                   );
                 },
               ),
@@ -160,10 +194,18 @@ class DriverDashboard extends StatelessWidget {
   }
 }
 
-class _IssueChip extends StatelessWidget {
+class _IssueChip2 extends StatelessWidget {
   final String label;
   final IconData icon;
-  const _IssueChip({required this.label, required this.icon});
+  final String origin, destination, date, time;
+  const _IssueChip2({
+    required this.label,
+    required this.icon,
+    required this.origin,
+    required this.destination,
+    required this.date,
+    required this.time,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -171,51 +213,97 @@ class _IssueChip extends StatelessWidget {
       avatar: Icon(icon, color: Colors.red),
       label: Text(label),
       onPressed: () async {
-        final note = await showDialog<String>(
+        // Ask for note (+ optional delay minutes when label == 'Delay')
+        final result = await showDialog<_IssueDialogResult>(
           context: context,
-          builder: (_) => _IssueDialog(type: label),
+          builder: (_) => _IssueDialog2(type: label),
         );
-        if (note == null) return;
-        await DriverService.instance.reportIssue(type: label, note: note);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('$label reported')),
-        );
+        if (result == null) return;
+
+        try {
+          await DriverService.instance.reportIssueForTrip(
+            origin: origin,
+            destination: destination,
+            date: date,
+            time: time,
+            type: label,
+            note: result.note,
+            delayMinutes: result.delayMinutes,
+          );
+          if (context.mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('$label reported. Students notified.')),
+            );
+          }
+        } catch (e) {
+          if (context.mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('Failed: $e')),
+            );
+          }
+        }
       },
       shape: StadiumBorder(side: BorderSide(color: Colors.red.shade100)),
     );
   }
 }
 
-class _IssueDialog extends StatefulWidget {
-  final String type;
-  const _IssueDialog({required this.type});
-
-  @override
-  State<_IssueDialog> createState() => _IssueDialogState();
+class _IssueDialogResult {
+  final String note;
+  final int? delayMinutes;
+  _IssueDialogResult({required this.note, this.delayMinutes});
 }
 
-class _IssueDialogState extends State<_IssueDialog> {
-  final _c = TextEditingController();
+class _IssueDialog2 extends StatefulWidget {
+  final String type;
+  const _IssueDialog2({required this.type});
+  @override
+  State<_IssueDialog2> createState() => _IssueDialog2State();
+}
+
+class _IssueDialog2State extends State<_IssueDialog2> {
+  final _note = TextEditingController();
+  final _delay = TextEditingController(); // only used for "Delay"
   bool _sending = false;
 
   @override
   Widget build(BuildContext context) {
+    final isDelay = widget.type.toLowerCase() == 'delay';
     return AlertDialog(
       title: Text('Report ${widget.type}'),
-      content: TextField(
-        controller: _c,
-        maxLines: 4,
-        decoration: const InputDecoration(
-          hintText: 'Add a note (optional)',
-          border: OutlineInputBorder(),
-        ),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (isDelay)
+            TextField(
+              controller: _delay,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(
+                labelText: 'Delay minutes (optional)',
+                border: OutlineInputBorder(),
+              ),
+            ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _note,
+            maxLines: 4,
+            decoration: const InputDecoration(
+              hintText: 'Add a note (optional)',
+              border: OutlineInputBorder(),
+            ),
+          ),
+        ],
       ),
       actions: [
         TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
         ElevatedButton(
           onPressed: _sending ? null : () async {
             setState(() => _sending = true);
-            Navigator.pop(context, _c.text.trim());
+            final mins = int.tryParse(_delay.text.trim());
+            Navigator.pop(context, _IssueDialogResult(
+              note: _note.text.trim(),
+              delayMinutes: mins,
+            ));
           },
           style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
           child: _sending

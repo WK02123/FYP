@@ -3,10 +3,14 @@ module.exports = {
   root: true,
   env: { node: true, es2021: true },
   parser: '@typescript-eslint/parser',
-  parserOptions: { project: ['./tsconfig.json'], sourceType: 'module' },
+  parserOptions: {
+    project: ['./tsconfig.json'],
+    tsconfigRootDir: __dirname, // <-- important on Windows
+    sourceType: 'module',
+  },
   plugins: ['@typescript-eslint'],
   extends: ['eslint:recommended', 'plugin:@typescript-eslint/recommended'],
-  ignorePatterns: ['lib/**', 'node_modules/**'],
+  ignorePatterns: ['lib/**', 'node_modules/**', '.eslintrc.js'],
   rules: {
     // we intentionally lazy-load heavy deps in CF
     '@typescript-eslint/no-require-imports': 'off',

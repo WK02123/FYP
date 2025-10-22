@@ -6,6 +6,8 @@
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
 
     <!-- Package visibility for text processing (keep outside <application>) -->
     <queries>
@@ -52,6 +54,12 @@
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
+
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_channel_id"
+            android:value="trip_reminders" />
+
+
     </application>
 
 </manifest>

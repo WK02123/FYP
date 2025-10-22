@@ -3,10 +3,22 @@ import { onRequest, onCall, HttpsError } from "firebase-functions/v2/https";
 import { onSchedule } from "firebase-functions/v2/scheduler";
 import { onDocumentCreated } from "firebase-functions/v2/firestore";
 import { logger } from "firebase-functions/v2";
+import * as dotenv from "dotenv";
+dotenv.config();
 
-/** ───────────────────────────────
- *  Load .env.local only in local/dev
- *  ─────────────────────────────── */
+import { defineSecret } from "firebase-functions/params";
+
+// ─────────────────────────────────────────────────────────────
+// Secrets (set in prod with CLI):
+//   firebase functions:secrets:set STRIPE_SECRET
+//   firebase functions:secrets:set SENDGRID_API_KEY
+// ─────────────────────────────────────────────────────────────
+const STRIPE_SECRET = defineSecret("STRIPE_SECRET");
+const SENDGRID_API_KEY = defineSecret("SENDGRID_API_KEY");
+
+// ─────────────────────────────────────────────────────────────
+// Load .env.local only when running the emulator
+// ─────────────────────────────────────────────────────────────
 (() => {
   try {
     const isEmulator =
@@ -17,9 +29,8 @@ import { logger } from "firebase-functions/v2";
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const path = require("path");
       // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const dotenv = require("dotenv");
-
-      dotenv.config({ path: path.join(__dirname, "..", ".env.local") });
+      const dotenvLocal = require("dotenv");
+      dotenvLocal.config({ path: path.join(__dirname, "..", ".env.local") });
       logger.info("✅ .env.local loaded for emulator");
     }
   } catch (e) {
@@ -27,21 +38,40 @@ import { logger } from "firebase-functions/v2";
   }
 })();
 
-/** ---------- Helpers ---------- */
+// ─────────────────────────────────────────────────────────────
+// Firebase Admin — initialize at module load
+// ─────────────────────────────────────────────────────────────
+import * as admin from "firebase-admin";
+if (!admin.apps.length) {
+  admin.initializeApp();
+  logger.info("✅ firebase-admin initialized");
+}
+
+// ─────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────
 const REGION = "asia-southeast1" as const;
 
-const getEnv = (key: string, required = true): string => {
-  const v = process.env[key];
-  if (!v && required) throw new Error(`${key} not configured`);
-  return v ?? "";
-};
-
-/** Lazy loaders (avoid top-level imports) */
 const getStripe = () => {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const Stripe = require("stripe");
-  const secret = getEnv("STRIPE_SECRET");
-  return new Stripe(secret, { apiVersion: "2024-06-20" });
+  const isEmulator =
+    process.env.FUNCTIONS_EMULATOR === "true" ||
+    process.env.FIREBASE_EMULATOR_HUB !== undefined;
+
+  const key = isEmulator ? process.env.STRIPE_SECRET : STRIPE_SECRET.value();
+  if (!key) throw new Error("STRIPE_SECRET not configured");
+  return new Stripe(key, { apiVersion: "2024-06-20" });
+};
+
+const getSendgridKey = (): string => {
+  const isEmulator =
+    process.env.FUNCTIONS_EMULATOR === "true" ||
+    process.env.FIREBASE_EMULATOR_HUB !== undefined;
+
+  const key = isEmulator ? process.env.SENDGRID_API_KEY : SENDGRID_API_KEY.value();
+  if (!key) throw new Error("SENDGRID_API_KEY not configured");
+  return key;
 };
 
 const getNodemailer = () => {
@@ -49,221 +79,156 @@ const getNodemailer = () => {
   return require("nodemailer");
 };
 
-const getAdmin = (): typeof import("firebase-admin") => {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const admin = require("firebase-admin");
+/* ------------------------------------------------------------------
+   FCM token resolvers
+-------------------------------------------------------------------*/
 
-  if (!admin.apps.length) {
-    admin.initializeApp();
+// Use the top-level admin (most places)
+const resolveFcmToken = async (
+  userId: string,
+  isDriver = false
+): Promise<{ fcmToken: string | null; tried: string[] }> => {
+  const db = admin.firestore();
+  const tried: string[] = [];
+  const cols = isDriver
+    ? ["drivers", "users", "students", "profiles"]
+    : ["users", "students", "profiles", "drivers"];
+
+  for (const col of cols) {
+    tried.push(`${col}/${userId}`);
+    const doc = await db.collection(col).doc(userId).get();
+    if (doc.exists) {
+      const token = (doc.data() as { fcmToken?: string } | undefined)?.fcmToken ?? null;
+      if (token) return { fcmToken: token, tried };
+    }
   }
-
-  return admin;
+  return { fcmToken: null, tried };
 };
 
-/** ---------- Email Template Helpers ---------- */
+// Use a provided _admin instance (inside runScheduledScan which lazy-loads)
+const resolveFcmTokenWith = async (
+  _admin: typeof import("firebase-admin"),
+  userId: string,
+  isDriver = false
+): Promise<{ fcmToken: string | null; tried: string[] }> => {
+  const db = _admin.firestore();
+  const tried: string[] = [];
+  const cols = isDriver
+    ? ["drivers", "users", "students", "profiles"]
+    : ["users", "students", "profiles", "drivers"];
+
+  for (const col of cols) {
+    tried.push(`${col}/${userId}`);
+    const doc = await db.collection(col).doc(userId).get();
+    if (doc.exists) {
+      const token = (doc.data() as { fcmToken?: string } | undefined)?.fcmToken ?? null;
+      if (token) return { fcmToken: token, tried };
+    }
+  }
+  return { fcmToken: null, tried };
+};
+
+/* ------------------------------------------------------------------
+   Firestore trigger: push "Booking confirmed" when student_trip is created
+-------------------------------------------------------------------*/
+export const onStudentTripCreated = onDocumentCreated(
+  { region: REGION, document: "student_trips/{tripId}" },
+  async (event) => {
+    const snap = event.data;
+    if (!snap) return;
+
+    type Trip = {
+      studentId?: string;
+      origin?: string;
+      destination?: string;
+      date?: string;   // "YYYY-MM-DD"
+      time?: string;   // "HH:mm"
+      time12?: string; // "3:00 PM" optional
+    };
+
+    const trip = snap.data() as Trip;
+    const tripId = event.params.tripId;
+    const studentId = trip?.studentId;
+    if (!studentId) {
+      logger.warn(`onStudentTripCreated: missing studentId on ${tripId}`);
+      return;
+    }
+
+    try {
+      // Idempotency log
+      const logRef = admin.firestore().collection("notification_logs").doc(`booking_confirmed_${tripId}`);
+      try {
+        await logRef.create({
+          type: "booking_confirmed",
+          tripId,
+          studentId,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+      } catch {
+        logger.info(`onStudentTripCreated: log exists for ${tripId}, skipping duplicate push.`);
+        return;
+      }
+
+      const { fcmToken, tried } = await resolveFcmToken(studentId, false);
+      if (!fcmToken) {
+        logger.warn(`onStudentTripCreated: no FCM token for ${studentId}. Tried: ${tried.join(", ")}`);
+        await logRef.update({ status: "failed", reason: "no_fcm_token", tried });
+        return;
+      }
+
+      const origin = trip.origin ?? "";
+      const destination = trip.destination ?? "";
+      const date = trip.date ?? "";
+      const timeText = trip.time12 ?? trip.time ?? "";
+
+      await admin.messaging().send({
+        token: fcmToken,
+        notification: {
+          title: "✅ Booking confirmed",
+          body: `${origin} → ${destination} on ${date} • ${timeText}`,
+        },
+        data: {
+          type: "booking_confirmed",
+          origin,
+          destination,
+          date,
+          time: timeText,
+          tripId,
+          channelId: "booking_updates",
+        },
+        android: {
+          priority: "high",
+          notification: { sound: "default", channelId: "booking_updates" },
+        },
+      });
+
+      await logRef.update({ status: "sent", sentAt: new Date().toISOString() });
+      logger.info(`📣 Booking-confirmed push sent for ${tripId} to ${studentId}`);
+    } catch (e) {
+      logger.error("onStudentTripCreated push failed:", e);
+    }
+  }
+);
+
+/* ------------------------------------------------------------------
+   Email template helpers
+-------------------------------------------------------------------*/
 const getEmailStyles = () => `
-  body {
-    margin: 0;
-    padding: 0;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-    background-color: #f5f5f5;
-  }
-  .email-container {
-    max-width: 600px;
-    margin: 0 auto;
-    background-color: #ffffff;
-  }
-  .header {
-    background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
-    padding: 40px 20px;
-    text-align: center;
-  }
-  .logo {
-    font-size: 32px;
-    font-weight: bold;
-    color: #ffffff;
-    margin: 0;
-  }
-  .content {
-    padding: 40px 30px;
-  }
-  .title {
-    font-size: 28px;
-    font-weight: bold;
-    color: #1f2937;
-    margin: 0 0 10px 0;
-  }
-  .subtitle {
-    font-size: 16px;
-    color: #6b7280;
-    margin: 0 0 30px 0;
-  }
-  .card {
-    background-color: #f9fafb;
-    border-radius: 12px;
-    padding: 24px;
-    margin-bottom: 24px;
-    border: 1px solid #e5e7eb;
-  }
-  .route {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 20px;
-    padding: 16px;
-    background-color: #ffffff;
-    border-radius: 8px;
-  }
-  .location {
-    font-size: 18px;
-    font-weight: 600;
-    color: #1f2937;
-  }
-  .arrow {
-    font-size: 24px;
-    color: #ef4444;
-    margin: 0 10px;
-  }
-  .info-row {
-    display: flex;
-    justify-content: space-between;
-    padding: 12px 0;
-    border-bottom: 1px solid #e5e7eb;
-  }
-  .info-row:last-child {
-    border-bottom: none;
-  }
-  .info-label {
-    font-size: 14px;
-    color: #6b7280;
-    font-weight: 500;
-  }
-  .info-value {
-    font-size: 14px;
-    color: #1f2937;
-    font-weight: 600;
-  }
-  .qr-section {
-    background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
-    border-radius: 12px;
-    padding: 24px;
-    text-align: center;
-    margin: 24px 0;
-  }
-  .qr-icon {
-    font-size: 48px;
-    margin-bottom: 12px;
-  }
-  .qr-text {
-    font-size: 16px;
-    color: #92400e;
-    font-weight: 600;
-    margin: 0;
-  }
-  .qr-subtext {
-    font-size: 14px;
-    color: #78350f;
-    margin: 8px 0 0 0;
-  }
-  .total-section {
-    background: linear-gradient(135deg, #dbeafe 0%, #bfdbfe 100%);
-    border-radius: 12px;
-    padding: 20px 24px;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-top: 24px;
-  }
-  .total-label {
-    font-size: 16px;
-    color: #1e40af;
-    font-weight: 600;
-  }
-  .total-amount {
-    font-size: 32px;
-    color: #1e3a8a;
-    font-weight: bold;
-  }
-  .tips {
-    background-color: #ecfdf5;
-    border-left: 4px solid #10b981;
-    padding: 16px 20px;
-    margin-top: 24px;
-    border-radius: 8px;
-  }
-  .tips-title {
-    font-size: 14px;
-    font-weight: 600;
-    color: #065f46;
-    margin: 0 0 8px 0;
-  }
-  .tips-list {
-    margin: 0;
-    padding-left: 20px;
-    color: #047857;
-    font-size: 14px;
-    line-height: 1.8;
-  }
-  .footer {
-    background-color: #1f2937;
-    padding: 30px;
-    text-align: center;
-    color: #9ca3af;
-    font-size: 14px;
-  }
-  .footer-link {
-    color: #ef4444;
-    text-decoration: none;
-  }
-  .cancel-banner {
-    background: linear-gradient(135deg, #fee2e2 0%, #fecaca 100%);
-    border-radius: 12px;
-    padding: 20px 24px;
-    text-align: center;
-    margin-bottom: 24px;
-  }
-  .cancel-icon {
-    font-size: 48px;
-    margin-bottom: 8px;
-  }
-  .cancel-text {
-    font-size: 18px;
-    color: #991b1b;
-    font-weight: 600;
-    margin: 0;
-  }
-  .refund-section {
-    background: linear-gradient(135deg, #d1fae5 0%, #a7f3d0 100%);
-    border-radius: 12px;
-    padding: 24px;
-    text-align: center;
-    margin: 24px 0;
-  }
-  .refund-icon {
-    font-size: 48px;
-    margin-bottom: 12px;
-  }
-  .refund-amount {
-    font-size: 36px;
-    color: #065f46;
-    font-weight: bold;
-    margin: 8px 0;
-  }
-  .refund-text {
-    font-size: 14px;
-    color: #047857;
-    margin: 0;
-  }
-  .cta-button {
-    display: inline-block;
-    background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
-    color: white;
-    text-decoration: none;
-    padding: 12px 32px;
-    border-radius: 8px;
-    font-weight: 600;
-    font-size: 16px;
-  }
+  body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #f5f5f5; }
+  .email-container { max-width: 600px; margin: 0 auto; background-color: #ffffff; }
+  .header { background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%); padding: 40px 20px; text-align: center; }
+  .logo { font-size: 32px; font-weight: bold; color: #ffffff; margin: 0; }
+  .content { padding: 40px 30px; }
+  .title { font-size: 28px; font-weight: bold; color: #1f2937; margin: 0 0 10px 0; }
+  .subtitle { font-size: 16px; color: #6b7280; margin: 0 0 30px 0; }
+  .card { background-color: #f9fafb; border-radius: 12px; padding: 24px; margin-bottom: 24px; border: 1px solid #e5e7eb; }
+  .route { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; padding: 16px; background-color: #ffffff; border-radius: 8px; }
+  .location { font-size: 18px; font-weight: 600; color: #1f2937; }
+  .arrow { font-size: 24px; color: #ef4444; margin: 0 10px; }
+  .info-row { display: flex; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid #e5e7eb; }
+  .info-row:last-child { border-bottom: none; }
+  .info-label { font-size: 14px; color: #6b7280; font-weight: 500; }
+  .info-value { font-size: 14px; color: #1f2937; font-weight: 600; }
 `;
 
 const getBookingEmailHTML = (
@@ -275,65 +240,32 @@ const getBookingEmailHTML = (
   totalAmount: string | number
 ) => `
 <!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <style>${getEmailStyles()}</style>
+<html><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>${getEmailStyles()}</style>
 </head>
 <body>
   <div class="email-container">
-    <div class="header">
-      <h1 class="logo">🚌 Ridemate</h1>
-    </div>
+    <div class="header"><h1 class="logo">🚌 Ridemate</h1></div>
     <div class="content">
       <h1 class="title">🎉 Booking Confirmed!</h1>
       <p class="subtitle">Your shuttle reservation is all set. Get ready for a comfortable ride!</p>
       <div class="card">
-        <div class="route">
-          <div class="location">${origin}</div>
-          <div class="arrow">→</div>
-          <div class="location">${destination}</div>
-        </div>
-        <div class="info-row">
-          <span class="info-label">📅 Date</span>
-          <span class="info-value">${date}</span>
-        </div>
-        <div class="info-row">
-          <span class="info-label">🕐 Time</span>
-          <span class="info-value">${time}</span>
-        </div>
-        <div class="info-row">
-          <span class="info-label">💺 Seat(s)</span>
-          <span class="info-value">${seats}</span>
-        </div>
+        <div class="route"><div class="location">${origin}</div><div class="arrow">→</div><div class="location">${destination}</div></div>
+        <div class="info-row"><span class="info-label">📅 Date</span><span class="info-value">${date}</span></div>
+        <div class="info-row"><span class="info-label">🕐 Time</span><span class="info-value">${time}</span></div>
+        <div class="info-row"><span class="info-label">💺 Seat(s)</span><span class="info-value">${seats}</span></div>
       </div>
-      <div class="qr-section">
-        <div class="qr-icon">📱</div>
-        <p class="qr-text">Show Your QR Code</p>
-        <p class="qr-subtext">Present this booking confirmation to the driver</p>
-      </div>
-      <div class="total-section">
-        <span class="total-label">Total Paid</span>
-        <span class="total-amount">RM ${totalAmount}</span>
-      </div>
-      <div class="tips">
-        <p class="tips-title">✨ Travel Tips</p>
-        <ul class="tips-list">
-          <li>Arrive at the pickup point 5 minutes early</li>
-          <li>Have your booking QR code ready to show</li>
-          <li>Keep your belongings secure during the trip</li>
-          <li>Follow the driver's safety instructions</li>
-        </ul>
+      <div class="card">
+        <div class="info-row"><span class="info-label">Total Paid</span><span class="info-value">RM ${totalAmount}</span></div>
       </div>
     </div>
     <div class="footer">
-      <p>Need help? Contact us at <a href="mailto:support@ridemate.com" class="footer-link">support@ridemate.com</a></p>
-      <p style="margin-top: 16px;">© ${new Date().getFullYear()} Ridemate Shuttle. Safe travels! 🚌</p>
+      <p>Need help? Contact us at <a href="mailto:heartx8880@gmail.com">heartx8880@gmail.com</a></p>
+      <p style="margin-top: 16px;">© ${new Date().getFullYear()} Ridemate Shuttle</p>
     </div>
   </div>
-</body>
-</html>
+</body></html>
 `;
 
 const getCancellationEmailHTML = (
@@ -344,160 +276,116 @@ const getCancellationEmailHTML = (
   refundAmount: string | number
 ) => `
 <!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <style>${getEmailStyles()}</style>
+<html><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>${getEmailStyles()}</style>
 </head>
 <body>
   <div class="email-container">
-    <div class="header">
-      <h1 class="logo">🚌 Ridemate</h1>
-    </div>
+    <div class="header"><h1 class="logo">🚌 Ridemate</h1></div>
     <div class="content">
-      <div class="cancel-banner">
-        <div class="cancel-icon">🔄</div>
-        <p class="cancel-text">Booking Cancelled</p>
-      </div>
-      <h1 class="title">We're Sorry to See You Go</h1>
-      <p class="subtitle">Your booking has been successfully cancelled. Here are the details:</p>
+      <h1 class="title">Booking Cancelled</h1>
       <div class="card">
-        <div class="route">
-          <div class="location">${origin}</div>
-          <div class="arrow">→</div>
-          <div class="location">${destination}</div>
-        </div>
-        <div class="info-row">
-          <span class="info-label">📅 Date</span>
-          <span class="info-value">${date}</span>
-        </div>
-        <div class="info-row">
-          <span class="info-label">🕐 Time</span>
-          <span class="info-value">${time}</span>
-        </div>
-        <div class="info-row">
-          <span class="info-label">📋 Status</span>
-          <span class="info-value" style="color: #dc2626;">Cancelled</span>
-        </div>
+        <div class="route"><div class="location">${origin}</div><div class="arrow">→</div><div class="location">${destination}</div></div>
+        <div class="info-row"><span class="info-label">📅 Date</span><span class="info-value">${date}</span></div>
+        <div class="info-row"><span class="info-label">🕐 Time</span><span class="info-value">${time}</span></div>
+        <div class="info-row"><span class="info-label">📋 Status</span><span class="info-value" style="color:#dc2626;">Cancelled</span></div>
       </div>
-      <div class="refund-section">
-        <div class="refund-icon">💰</div>
-        <p style="font-size: 14px; color: #047857; font-weight: 600; margin: 0;">Refund Amount</p>
-        <div class="refund-amount">RM ${refundAmount}</div>
-        <p class="refund-text">Processing time: 5-10 business days</p>
-      </div>
-      <div class="tips">
-        <p class="tips-title">ℹ️ Refund Information</p>
-        <ul class="tips-list" style="color: #065f46;">
-          <li>Refund will be credited to your original payment method</li>
-          <li>You'll receive a notification once processed</li>
-          <li>Bank processing may take an additional 3-5 days</li>
-          <li>Contact support if you don't see the refund within 10 days</li>
-        </ul>
-      </div>
-      <div style="text-align: center; margin-top: 32px;">
-        <p style="color: #6b7280; margin-bottom: 16px;">Changed your mind? Book another trip anytime!</p>
-        <a href="https://ridemate.com" class="cta-button">Browse Routes</a>
+      <div class="card">
+        <div class="info-row"><span class="info-label">Refund Amount</span><span class="info-value">RM ${refundAmount}</span></div>
+        <div class="info-row"><span class="info-label">Processing</span><span class="info-value">5–10 business days</span></div>
       </div>
     </div>
     <div class="footer">
-      <p>Need help? Contact us at <a href="mailto:support@ridemate.com" class="footer-link">support@ridemate.com</a></p>
-      <p style="margin-top: 16px;">© ${new Date().getFullYear()} Ridemate Shuttle. We hope to serve you again soon! 🚌</p>
+      <p>Need help? Contact us at <a href="mailto:heartx8880@gmail.com">heartx8880@gmail.com</a></p>
+      <p style="margin-top: 16px;">© ${new Date().getFullYear()} Ridemate Shuttle</p>
     </div>
   </div>
-</body>
-</html>
+</body></html>
 `;
 
-/** ---------- Health check ---------- */
+/* ------------------------------------------------------------------
+   Health check
+-------------------------------------------------------------------*/
 export const hello = onRequest({ region: REGION }, (_req, res) => {
   res.status(200).send("ok");
 });
 
-/** ---------- Create Payment Intent (Stripe) ---------- */
-export const createPaymentIntent = onCall({ region: REGION }, async (request) => {
-  if (!request.auth) throw new HttpsError("unauthenticated", "Sign in required");
+/* ------------------------------------------------------------------
+   Stripe: Create Payment Intent / Refund
+-------------------------------------------------------------------*/
+export const createPaymentIntent = onCall(
+  { region: REGION, secrets: [STRIPE_SECRET] },
+  async (request) => {
+    if (!request.auth) throw new HttpsError("unauthenticated", "Sign in required");
 
-  const {
-    amount,
-    currency = "myr",
-    description = "Bus ticket payment",
-  } = (request.data ?? {}) as {
-    amount: number | string;
-    currency?: string;
-    description?: string;
-  };
+    const { amount, currency = "myr", description = "Bus ticket payment" } = (request.data ?? {}) as {
+      amount: number | string;
+      currency?: string;
+      description?: string;
+    };
 
-  const numAmount = Number(amount);
-  if (!Number.isFinite(numAmount) || numAmount <= 0) {
-    throw new HttpsError("invalid-argument", "amount must be > 0");
-  }
-
-  try {
-    const stripe = getStripe();
-    const pi = await stripe.paymentIntents.create({
-      amount: Math.trunc(numAmount),
-      currency: currency.toLowerCase(),
-      description,
-      automatic_payment_methods: { enabled: true },
-      metadata: { userId: request.auth.uid, description },
-    });
-    return { clientSecret: pi.client_secret };
-  } catch (err: unknown) {
-    const e = err as Error & { message?: string };
-    logger.error("Stripe error:", e);
-    throw new HttpsError("internal", e?.message ?? "Payment processing failed");
-  }
-});
-
-/** ---------- Refund Payment (Stripe) ---------- */
-export const refundPayment = onCall({ region: REGION }, async (request) => {
-  if (!request.auth) throw new HttpsError("unauthenticated", "Sign in required");
-
-  const { paymentIntentId, amount } = (request.data ?? {}) as {
-    paymentIntentId?: string;
-    amount?: number;
-  };
-  if (!paymentIntentId) throw new HttpsError("invalid-argument", "paymentIntentId is required");
-
-  try {
-    const stripe = getStripe();
-    const pi = await stripe.paymentIntents.retrieve(paymentIntentId);
-    const latestCharge = pi.latest_charge;
-    if (!latestCharge) {
-      throw new HttpsError("failed-precondition", "No charge found for this payment");
+    const numAmount = Number(amount);
+    if (!Number.isFinite(numAmount) || numAmount <= 0) {
+      throw new HttpsError("invalid-argument", "amount must be > 0");
     }
-    const chargeId = typeof latestCharge === "string" ? latestCharge : latestCharge.id;
 
-    const refund = await stripe.refunds.create({
-      charge: chargeId,
-      amount: amount && amount > 0 ? Math.trunc(amount) : undefined,
-      metadata: { userId: request.auth.uid, refundedAt: new Date().toISOString() },
-    });
-
-    logger.info("Refund created:", refund.id);
-    return { success: true, refundId: refund.id, amount: refund.amount, status: refund.status };
-  } catch (err: unknown) {
-    const e = err as Error & { message?: string };
-    logger.error("Refund error:", e);
-    throw new HttpsError("internal", e?.message ?? "Refund processing failed");
+    try {
+      const stripe = getStripe();
+      const pi = await stripe.paymentIntents.create({
+        amount: Math.trunc(numAmount),
+        currency: currency.toLowerCase(),
+        description,
+        automatic_payment_methods: { enabled: true },
+        metadata: { userId: request.auth.uid, description },
+      });
+      return { clientSecret: pi.client_secret };
+    } catch (err: unknown) {
+      const e = err as Error & { message?: string };
+      logger.error("Stripe error:", e);
+      throw new HttpsError("internal", e?.message ?? "Payment processing failed");
+    }
   }
-});
+);
 
-/** ---------- Booking Confirmation Email (SendGrid SMTP) ---------- */
-export const sendBookingEmail = onCall({ region: REGION }, async (request) => {
+export const refundPayment = onCall(
+  { region: REGION, secrets: [STRIPE_SECRET] },
+  async (request) => {
+    if (!request.auth) throw new HttpsError("unauthenticated", "Sign in required");
+
+    const { paymentIntentId, amount } = (request.data ?? {}) as { paymentIntentId?: string; amount?: number };
+    if (!paymentIntentId) throw new HttpsError("invalid-argument", "paymentIntentId is required");
+
+    try {
+      const stripe = getStripe();
+      const pi = await stripe.paymentIntents.retrieve(paymentIntentId);
+      const latestCharge = pi.latest_charge;
+      if (!latestCharge) throw new HttpsError("failed-precondition", "No charge found for this payment");
+      const chargeId = typeof latestCharge === "string" ? latestCharge : latestCharge.id;
+
+      const refund = await stripe.refunds.create({
+        charge: chargeId,
+        amount: amount && amount > 0 ? Math.trunc(amount) : undefined,
+        metadata: { userId: request.auth.uid, refundedAt: new Date().toISOString() },
+      });
+
+      logger.info("Refund created:", refund.id);
+      return { success: true, refundId: refund.id, amount: refund.amount, status: refund.status };
+    } catch (err: unknown) {
+      const e = err as Error & { message?: string };
+      logger.error("Refund error:", e);
+      throw new HttpsError("internal", e?.message ?? "Refund processing failed");
+    }
+  }
+);
+
+/* ------------------------------------------------------------------
+   SendGrid emails (SMTP via Nodemailer)
+-------------------------------------------------------------------*/
+export const sendBookingEmail = onCall({ region: REGION, secrets: [SENDGRID_API_KEY] }, async (request) => {
   if (!request.auth) throw new HttpsError("unauthenticated", "Sign in required");
 
-  const {
-    email,
-    origin,
-    destination,
-    date,
-    time,
-    seats,
-    totalAmount,
-  } = (request.data ?? {}) as {
+  const { email, origin, destination, date, time, seats, totalAmount } = (request.data ?? {}) as {
     email?: string;
     origin?: string;
     destination?: string;
@@ -515,12 +403,14 @@ export const sendBookingEmail = onCall({ region: REGION }, async (request) => {
       host: "smtp.sendgrid.net",
       port: 587,
       secure: false,
-      auth: { user: "apikey", pass: getEnv("SENDGRID_API_KEY") },
+      auth: { user: "apikey", pass: getSendgridKey() },
     });
 
-    const fromEmail = getEnv("FROM_EMAIL", false) || "noreply@ridemate.com";
+    // MUST be a verified Single Sender in your SendGrid account
+    const from = { name: "Ridemate Shuttle", address: "heartx8880@gmail.com" as const };
+
     await transporter.sendMail({
-      from: `"Ridemate Shuttle" <${fromEmail}>`,
+      from,
       to: email,
       subject: "🎉 Your Ridemate Booking is Confirmed!",
       html: getBookingEmailHTML(
@@ -533,27 +423,18 @@ export const sendBookingEmail = onCall({ region: REGION }, async (request) => {
       ),
     });
 
-    logger.info("Booking email sent to:", email);
+    logger.info(`✅ Booking email sent to: ${email} (from ${from.address})`);
     return { success: true };
-  } catch (err: unknown) {
-    const e = err as Error & { message?: string };
-    logger.error("Email error:", e);
-    throw new HttpsError("internal", e?.message ?? "Failed to send email");
+  } catch (err: any) {
+    logger.error("Email error:", err);
+    throw new HttpsError("internal", err?.message ?? "Failed to send email");
   }
 });
 
-/** ---------- Cancellation Email (SendGrid SMTP) ---------- */
-export const sendCancellationEmail = onCall({ region: REGION }, async (request) => {
+export const sendCancellationEmail = onCall({ region: REGION, secrets: [SENDGRID_API_KEY] }, async (request) => {
   if (!request.auth) throw new HttpsError("unauthenticated", "Sign in required");
 
-  const {
-    email,
-    origin,
-    destination,
-    date,
-    time,
-    refundAmount,
-  } = (request.data ?? {}) as {
+  const { email, origin, destination, date, time, refundAmount } = (request.data ?? {}) as {
     email?: string;
     origin?: string;
     destination?: string;
@@ -570,12 +451,13 @@ export const sendCancellationEmail = onCall({ region: REGION }, async (request) 
       host: "smtp.sendgrid.net",
       port: 587,
       secure: false,
-      auth: { user: "apikey", pass: getEnv("SENDGRID_API_KEY") },
+      auth: { user: "apikey", pass: getSendgridKey() },
     });
 
-    const fromEmail = getEnv("FROM_EMAIL", false) || "noreply@ridemate.com";
+    const from = { name: "Ridemate Shuttle", address: "heartx8880@gmail.com" as const };
+
     await transporter.sendMail({
-      from: `"Ridemate Shuttle" <${fromEmail}>`,
+      from,
       to: email,
       subject: "🔄 Booking Cancelled - Refund Processing",
       html: getCancellationEmailHTML(
@@ -587,359 +469,364 @@ export const sendCancellationEmail = onCall({ region: REGION }, async (request) 
       ),
     });
 
-    logger.info("Cancellation email sent to:", email);
+    logger.info(`✅ Cancellation email sent to: ${email} (from ${from.address})`);
     return { success: true };
-  } catch (err: unknown) {
-    const e = err as Error & { message?: string };
-    logger.error("Email error:", e);
-    throw new HttpsError("internal", e?.message ?? "Failed to send email");
+  } catch (err: any) {
+    logger.error("Email error:", err);
+    throw new HttpsError("internal", err?.message ?? "Failed to send email");
   }
 });
 
-/** ---------- Trip Reminder (FCM via Admin) ---------- */
+/* ------------------------------------------------------------------
+   Push: sendTripReminder (callable)
+-------------------------------------------------------------------*/
 export const sendTripReminder = onCall({ region: REGION }, async (request) => {
   if (!request.auth) throw new HttpsError("unauthenticated", "Sign in required");
 
   const { userId, origin, destination, time, isDriver } = (request.data ?? {}) as {
-    userId?: string;
-    origin?: string;
-    destination?: string;
-    time?: string;
-    isDriver?: boolean;
+    userId?: string; origin?: string; destination?: string; time?: string; isDriver?: boolean;
   };
-
   if (!userId) throw new HttpsError("invalid-argument", "userId is required");
 
   try {
-    const admin = getAdmin();
-    const collection = isDriver ? "drivers" : "users";
-    const userDoc = await admin.firestore().collection(collection).doc(userId).get();
-    if (!userDoc.exists) throw new HttpsError("not-found", "User not found");
-
-    const userData = userDoc.data() as { fcmToken?: string } | undefined;
-    const fcmToken = userData?.fcmToken;
+    const { fcmToken, tried } = await resolveFcmToken(userId, !!isDriver);
     if (!fcmToken) {
-      logger.warn(`User ${userId} has no FCM token`);
-      return { success: false, message: "No FCM token" };
+      logger.warn(`sendTripReminder: no FCM token for ${userId}. Tried: ${tried.join(", ")}`);
+      return { success: false, message: "No FCM token / user not found", tried };
     }
 
     await admin.messaging().send({
       token: fcmToken,
       notification: {
         title: "🚌 Trip Reminder",
-        body: `Your trip ${origin} → ${destination} departs at ${time}. Don't be late!`,
+        body: `Your trip ${origin ?? ""} → ${destination ?? ""} departs at ${time ?? ""}. Don't be late!`,
       },
       data: {
         type: "trip_reminder",
         origin: origin ?? "",
         destination: destination ?? "",
         time: time ?? "",
+        channelId: "trip_reminders",
       },
+      android: { priority: "high", notification: { sound: "default", channelId: "trip_reminders" } },
     });
 
-    logger.info(`Reminder sent to user ${userId}`);
+    logger.info(`Reminder sent to ${userId}`);
     return { success: true };
-  } catch (err: unknown) {
-    const e = err as Error & { message?: string };
-    logger.error("Notification error:", e);
+  } catch (e: any) {
+    logger.error("sendTripReminder error:", e);
     throw new HttpsError("internal", e?.message ?? "Failed to send notification");
   }
 });
 
-/** ---------- Scheduled Notification Checker ---------- */
-// Runs every 10 minutes to check for upcoming trip reminders
-export const checkScheduledNotifications = onSchedule(
-  {
-    schedule: "every 10 minutes",
-    region: REGION,
-    timeZone: "Asia/Kuala_Lumpur",
-  },
-  async (event) => {
-    logger.info("🕐 Checking for scheduled notifications...");
+/* ------------------------------------------------------------------
+   Scheduled Notification Scanner (runs every 1 minute)
+-------------------------------------------------------------------*/
+async function runScheduledScan(
+  backfillMs = 5 * 60 * 1000,   // pick up slightly-late items
+  lookaheadMs = 1 * 60 * 1000   // scan 1 minute ahead
+) {
+  // Lazy-load admin here for isolation
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const _admin: typeof import("firebase-admin") = require("firebase-admin");
+  if (!_admin.apps.length) _admin.initializeApp();
+  const db = _admin.firestore();
 
-    try {
-      const admin = getAdmin();
-      const now = admin.firestore.Timestamp.now();
-      const tenMinutesFromNow = admin.firestore.Timestamp.fromDate(
-        new Date(Date.now() + 10 * 60 * 1000)
-      );
+  const now = Date.now();
+  const fromTs = _admin.firestore.Timestamp.fromDate(new Date(now - backfillMs));
+  const toTs   = _admin.firestore.Timestamp.fromDate(new Date(now + lookaheadMs));
 
-      // Find all scheduled notifications that should be sent in the next 10 minutes
-      const notificationsSnapshot = await admin
-        .firestore()
-        .collection("scheduled_notifications")
-        .where("status", "==", "scheduled")
-        .where("reminderTime", ">=", now)
-        .where("reminderTime", "<=", tenMinutesFromNow)
-        .get();
+  // Requires composite index: status ASC, reminderTime ASC on scheduled_notifications
+  const snapshot = await db
+    .collection("scheduled_notifications")
+    .where("status", "==", "scheduled")
+    .where("reminderTime", ">=", fromTs)
+    .where("reminderTime", "<=", toTs)
+    .get();
 
-      logger.info(`Found ${notificationsSnapshot.size} notifications to send`);
+  logger.info(
+    `🔎 scan window ${fromTs.toDate().toISOString()} → ${toTs.toDate().toISOString()} | found ${snapshot.size}`
+  );
 
-      const promises = notificationsSnapshot.docs.map(async (doc) => {
-        const data = doc.data();
-        const { userId, origin, destination, time, type, isDriver } = data;
+  await Promise.all(
+    snapshot.docs.map(async (doc) => {
+      const data = doc.data() as {
+        userId?: string;
+        origin?: string;
+        destination?: string;
+        time?: string;
+        type?: string;
+        isDriver?: boolean;
+        snapshotFcmToken?: string;
+      };
 
-        try {
-          // Get user's FCM token
-          const collection = isDriver ? "drivers" : "users";
-          const userDoc = await admin
-            .firestore()
-            .collection(collection)
-            .doc(userId)
-            .get();
+      const userId = data.userId ?? "";
+      const origin = data.origin ?? "";
+      const destination = data.destination ?? "";
+      const time = data.time ?? "";
+      const isDriver = !!data.isDriver;
 
-          if (!userDoc.exists) {
-            logger.warn(`User ${userId} not found`);
-            await doc.ref.update({ status: "failed", error: "User not found" });
-            return;
-          }
-
-          const userData = userDoc.data();
-          const fcmToken = userData?.fcmToken;
-
-          if (!fcmToken) {
-            logger.warn(`User ${userId} has no FCM token`);
-            await doc.ref.update({ status: "failed", error: "No FCM token" });
-            return;
-          }
-
-          // Send notification
-          await admin.messaging().send({
-            token: fcmToken,
-            notification: {
-              title: "🚌 Trip Reminder",
-              body: `Your trip ${origin} → ${destination} departs at ${time}. Departure in 30 minutes!`,
-            },
-            data: {
-              type: type || "trip_reminder",
-              origin: origin || "",
-              destination: destination || "",
-              time: time || "",
-            },
-            android: {
-              priority: "high",
-              notification: {
-                sound: "default",
-                channelId: "trip_reminders",
-              },
-            },
-          });
-
-          // Mark as sent
-          await doc.ref.update({
-            status: "sent",
-            sentAt: new Date().toISOString(),
-          });
-
-          logger.info(`✅ 30-min reminder sent to user ${userId} for trip at ${time}`);
-        } catch (error) {
-          logger.error(`Error sending notification for ${doc.id}:`, error);
-          await doc.ref.update({
-            status: "failed",
-            error: String(error),
-          });
-        }
-      });
-
-      await Promise.all(promises);
-      logger.info("✅ Finished processing scheduled notifications");
-    } catch (error) {
-      logger.error("Error in checkScheduledNotifications:", error);
-    }
-  }
-);
-
-/** ---------- TEST: Manually trigger notification check ---------- */
-/** ---------- TEST: Manually trigger notification check ---------- */
-export const testScheduledNotifications = onRequest(
-  { region: REGION },
-  async (req, res) => {
-    logger.info("🧪 Manually triggering scheduled notifications check...");
-
-    try {
-      const admin = getAdmin();
-      const db = admin.firestore();
-
-      // Calculate time window
-      const now = new Date();
-      const tenMinutesFromNow = new Date(now.getTime() + 10 * 60 * 1000);
-
-      logger.info(`Checking from ${now.toISOString()} to ${tenMinutesFromNow.toISOString()}`);
-
-      // Find all scheduled notifications
-      const notificationsSnapshot = await db
-        .collection("scheduled_notifications")
-        .where("status", "==", "scheduled")
-        .get();
-
-      logger.info(`Found ${notificationsSnapshot.size} total scheduled notifications`);
-
-      const results = [];
-      for (const doc of notificationsSnapshot.docs) {
-        const data = doc.data();
-        const { userId, origin, destination, time, type, isDriver, reminderTime } = data;
-
-        // Check if reminderTime is within our window
-        let reminderDate: Date;
-        if (reminderTime && reminderTime.toDate) {
-          reminderDate = reminderTime.toDate();
-        } else {
-          logger.warn(`Document ${doc.id} has invalid reminderTime`);
-          continue;
+      try {
+        // Prefer snapshot token; fallback to live lookup with _admin
+        let fcmToken = (data.snapshotFcmToken as string) || "";
+        let tried: string[] = ["snapshotFcmToken"];
+        if (!fcmToken) {
+          const resolved = await resolveFcmTokenWith(_admin, userId, isDriver);
+          fcmToken = resolved.fcmToken ?? "";
+          tried = resolved.tried;
         }
 
-        // Skip if not in time window
-        if (reminderDate < now || reminderDate > tenMinutesFromNow) {
-          logger.info(`Skipping ${doc.id} - reminder time ${reminderDate.toISOString()} not in window`);
-          continue;
+        if (!fcmToken) {
+          logger.warn(`Scheduled notif: no FCM for ${userId}. Tried: ${tried.join(", ")}`);
+          await doc.ref.update({ status: "failed", error: "No FCM token / user not found", tried });
+          return;
         }
 
-        logger.info(`Processing notification ${doc.id} for user ${userId}`);
+        await _admin.messaging().send({
+          token: fcmToken,
+          notification: {
+            title: "🚌 Trip Reminder",
+            body: `Your trip ${origin} → ${destination} departs at ${time}.`,
+          },
+          data: {
+            type: data.type || "trip_reminder",
+            origin,
+            destination,
+            time,
+            channelId: "trip_reminders",
+          },
+          android: {
+            priority: "high",
+            notification: { sound: "default", channelId: "trip_reminders" },
+          },
+        });
 
-        try {
-          const collection = isDriver ? "drivers" : "users";
-          const userDoc = await db.collection(collection).doc(userId).get();
-
-          if (!userDoc.exists) {
-            logger.warn(`User ${userId} not found`);
-            await doc.ref.update({ status: "failed", error: "User not found" });
-            results.push({ id: doc.id, status: "failed", error: "User not found" });
-            continue;
-          }
-
-          const userData = userDoc.data();
-          const fcmToken = userData?.fcmToken;
-
-          if (!fcmToken) {
-            logger.warn(`User ${userId} has no FCM token`);
-            await doc.ref.update({ status: "failed", error: "No FCM token" });
-            results.push({ id: doc.id, status: "failed", error: "No FCM token" });
-            continue;
-          }
-
-          await admin.messaging().send({
-            token: fcmToken,
-            notification: {
-              title: "🚌 Trip Reminder",
-              body: `Your trip ${origin} → ${destination} departs at ${time}. Departure in 30 minutes!`,
-            },
-            data: {
-              type: type || "trip_reminder",
-              origin: origin || "",
-              destination: destination || "",
-              time: time || "",
-            },
-            android: {
-              priority: "high",
-              notification: {
-                sound: "default",
-                channelId: "trip_reminders",
-              },
-            },
-          });
-
-          await doc.ref.update({
-            status: "sent",
-            sentAt: new Date().toISOString(),
-          });
-
-          logger.info(`✅ Reminder sent to user ${userId}`);
-          results.push({ id: doc.id, status: "sent", userId });
-        } catch (error) {
-          logger.error(`Error sending notification for ${doc.id}:`, error);
-          await doc.ref.update({
-            status: "failed",
-            error: String(error),
-          });
-          results.push({ id: doc.id, status: "failed", error: String(error) });
-        }
+        await doc.ref.update({ status: "sent", sentAt: new Date().toISOString() });
+        logger.info(`✅ Reminder sent to ${userId} for ${origin} → ${destination} @ ${time}`);
+      } catch (err) {
+        logger.error(`Error sending notification for ${doc.id}:`, err);
+        await doc.ref.update({ status: "failed", error: String(err) });
       }
+    })
+  );
+}
 
-      res.status(200).json({
-        success: true,
-        message: "Notification check completed",
-        totalChecked: notificationsSnapshot.size,
-        results,
-      });
-    } catch (error) {
-      logger.error("Error in test function:", error);
-      res.status(500).json({
-        success: false,
-        error: String(error),
-      });
-    }
+// Cron every minute
+export const checkScheduledNotifications = onSchedule(
+  { schedule: "every 1 minutes", region: REGION, timeZone: "Asia/Kuala_Lumpur", minInstances: 1 },
+  async () => {
+    await runScheduledScan(5 * 60 * 1000, 1 * 60 * 1000);
   }
 );
 
-/** ---------- TEST: Send Push Notification ---------- */
-export const testPushNotification = onRequest({ region: REGION }, async (req, res) => {
-logger.info("🧪 Testing push notification...");
-
-try {
-  const admin = getAdmin();
-
-  // Get userId from query parameter or use default
-  const userId = (req.query.userId as string) || 'test-user-123';
-
-  // Get user's FCM token
-  const userDoc = await admin.firestore().collection('users').doc(userId).get();
-
-  if (!userDoc.exists) {
-    res.status(404).json({
-      success: false,
-      error: 'User not found',
-      userId,
-    });
-    return;
+// Manual HTTP trigger for testing
+export const runScheduledOnce = onRequest({ region: REGION }, async (_req, res) => {
+  try {
+    await runScheduledScan(30 * 60 * 1000, 10 * 60 * 1000); // wider window for manual runs
+    res.status(200).send("ok");
+  } catch (e: any) {
+    logger.error(e);
+    res.status(500).send(e?.message ?? "error");
   }
-
-  const userData = userDoc.data();
-  const fcmToken = userData?.fcmToken;
-
-  if (!fcmToken) {
-    res.status(400).json({
-      success: false,
-      error: 'User has no FCM token',
-      userId,
-    });
-    return;
-  }
-
-  // Send the notification
-  await admin.messaging().send({
-    token: fcmToken,
-    notification: {
-      title: "🚌 Test Notification",
-      body: "Your trip from USM → Penang Sentral departs at 14:30. This is a test!",
-    },
-    data: {
-      type: "trip_reminder",
-      origin: "USM",
-      destination: "Penang Sentral",
-      time: "14:30",
-    },
-    android: {
-      priority: "high",
-      notification: {
-        sound: "default",
-        channelId: "trip_reminders",
-      },
-    },
-  });
-
-  logger.info(`✅ Test notification sent to user ${userId}`);
-
-  res.status(200).json({
-    success: true,
-    message: 'Push notification sent!',
-    userId,
-    fcmToken: fcmToken.substring(0, 20) + '...',
-  });
-} catch (error) {
-  logger.error("Error:", error);
-  res.status(500).json({
-    success: false,
-    error: String(error),
-  });
-}
 });
+
+/* ------------------------------------------------------------------
+   Test endpoints
+-------------------------------------------------------------------*/
+export const testScheduledNotifications = onRequest({ region: REGION }, async (_req, res) => {
+  try {
+    const db = admin.firestore();
+
+    const now = new Date();
+    const tenMinutesFromNow = new Date(now.getTime() + 10 * 60 * 1000);
+
+    const notificationsSnapshot = await db
+      .collection("scheduled_notifications")
+      .where("status", "==", "scheduled")
+      .get();
+
+    const results: any[] = [];
+    for (const doc of notificationsSnapshot.docs) {
+      const data = doc.data() as any;
+      const { userId, origin, destination, time, type, isDriver, reminderTime } = data;
+
+      let reminderDate: Date;
+      if (reminderTime && reminderTime.toDate) {
+        reminderDate = reminderTime.toDate();
+      } else {
+        logger.warn(`Document ${doc.id} has invalid reminderTime`);
+        continue;
+      }
+      if (reminderDate < now || reminderDate > tenMinutesFromNow) continue;
+
+      try {
+        let fcmToken = (data.snapshotFcmToken as string) || "";
+        let tried: string[] = ["snapshotFcmToken"];
+        if (!fcmToken) {
+          const resolved = await resolveFcmToken(userId, !!isDriver);
+          fcmToken = resolved.fcmToken ?? "";
+          tried = resolved.tried;
+        }
+        if (!fcmToken) {
+          await doc.ref.update({ status: "failed", error: "No FCM token / user not found", tried });
+          results.push({ id: doc.id, status: "failed", error: "No FCM token", tried });
+          continue;
+        }
+
+        await admin.messaging().send({
+          token: fcmToken,
+          notification: {
+            title: "🚌 Trip Reminder",
+            body: `Your trip ${origin} → ${destination} departs at ${time}. Departure in 30 minutes!`,
+          },
+          data: { type: type || "trip_reminder", origin, destination, time, channelId: "trip_reminders" },
+          android: { priority: "high", notification: { sound: "default", channelId: "trip_reminders" } },
+        });
+
+        await doc.ref.update({ status: "sent", sentAt: new Date().toISOString() });
+        results.push({ id: doc.id, status: "sent", userId });
+      } catch (error) {
+        await doc.ref.update({ status: "failed", error: String(error) });
+        results.push({ id: doc.id, status: "failed", error: String(error) });
+      }
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "Notification check completed",
+      totalChecked: notificationsSnapshot.size,
+      results,
+    });
+  } catch (error) {
+    logger.error("Error in test function:", error);
+    res.status(500).json({ success: false, error: String(error) });
+  }
+});
+
+export const testPushNotification = onRequest({ region: REGION }, async (req, res) => {
+  try {
+    const userId = (req.query.userId as string) || "test-user-123";
+
+    const { fcmToken, tried } = await resolveFcmToken(userId, false);
+    if (!fcmToken) {
+      res.status(400).json({ success: false, error: "No FCM token / user not found", userId, tried });
+      return;
+    }
+
+    await admin.messaging().send({
+      token: fcmToken,
+      notification: {
+        title: "🚌 Test Notification",
+        body: "Your trip from USM → Penang Sentral departs at 14:30. This is a test!",
+      },
+      data: { type: "trip_reminder", origin: "USM", destination: "Penang Sentral", time: "14:30", channelId: "trip_reminders" },
+      android: { priority: "high", notification: { sound: "default", channelId: "trip_reminders" } },
+    });
+
+    res.status(200).json({
+      success: true,
+      message: "Push notification sent!",
+      userId,
+      fcmToken: fcmToken.substring(0, 20) + "...",
+    });
+  } catch (error) {
+    logger.error("Error:", error);
+    res.status(500).json({ success: false, error: String(error) });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
+// Driver reports an issue → notify affected students for that trip
+// ─────────────────────────────────────────────────────────────
+export const reportDriverIssue = onCall({ region: REGION }, async (request) => {
+  if (!request.auth) throw new HttpsError("unauthenticated", "Sign in required");
+
+  // Driver passes the exact trip context for the nearest schedule
+  const {
+    origin, destination, date, time, type, note, delayMinutes
+  } = (request.data ?? {}) as {
+    origin?: string; destination?: string; date?: string; time?: string;
+    type?: string; note?: string; delayMinutes?: number;
+  };
+
+  if (!origin || !destination || !date || !time) {
+    throw new HttpsError("invalid-argument", "origin, destination, date, time are required");
+  }
+
+  try {
+    const db = admin.firestore();
+
+    // 1) Log the issue (optional but useful)
+    await db.collection("driver_issues").add({
+      driverId: request.auth.uid,
+      origin, destination, date, time,
+      type: type ?? "Issue",
+      note: note ?? "",
+      delayMinutes: delayMinutes ?? 0,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    // 2) Find students booked on the same trip (exact match on equality fields → no composite index needed)
+    const qs = await db.collection("student_trips")
+      .where("origin", "==", origin)
+      .where("destination", "==", destination)
+      .where("date", "==", date)     // "YYYY-MM-DD"
+      .where("time", "==", time)     // "HH:mm"
+      .get();
+
+    if (qs.empty) {
+      logger.info(`reportDriverIssue: no students for ${origin}→${destination} ${date} ${time}`);
+      return { success: true, sent: 0 };
+    }
+
+    // 3) Message text
+    const delayText = (delayMinutes && delayMinutes > 0) ? ` (~${delayMinutes} min delay)` : "";
+    const body = `Route ${origin} → ${destination} at ${time} will be delayed${delayText}. ${type ?? "Issue"} reported by driver.`;
+
+    let sent = 0;
+    for (const doc of qs.docs) {
+      const trip = doc.data() as { studentId?: string };
+      const studentId = trip.studentId;
+      if (!studentId) continue;
+
+      // Resolve FCM (users > students > profiles > drivers)
+      const { fcmToken } = await (async () => {
+        const tried: string[] = [];
+        const cols = ["users", "students", "profiles", "drivers"];
+        for (const col of cols) {
+          tried.push(`${col}/${studentId}`);
+          const d = await db.collection(col).doc(studentId).get();
+          if (d.exists) {
+            const t = (d.data() as { fcmToken?: string } | undefined)?.fcmToken;
+            if (t) return { fcmToken: t, tried };
+          }
+        }
+        return { fcmToken: null as string | null, tried };
+      })();
+
+      if (!fcmToken) continue;
+
+      await admin.messaging().send({
+        token: fcmToken,
+        notification: { title: "⏱️ Route Delay Notice", body },
+        data: {
+          type: "route_delay",
+          origin, destination, date, time,
+          channelId: "route_alerts",
+        },
+        android: {
+          priority: "high",
+          notification: { sound: "default", channelId: "route_alerts" },
+        },
+      });
+      sent++;
+    }
+
+    logger.info(`reportDriverIssue: sent ${sent} notifications for ${origin}→${destination} ${date} ${time}`);
+    return { success: true, sent };
+  } catch (e: any) {
+    logger.error("reportDriverIssue error:", e);
+    throw new HttpsError("internal", e?.message ?? "Failed to process driver issue");
+  }
+});
+

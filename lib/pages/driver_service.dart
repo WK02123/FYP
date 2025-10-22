@@ -1,6 +1,8 @@
 // lib/pages/driver_service.dart
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_functions/cloud_functions.dart';
+import 'package:firebase_core/firebase_core.dart';
 
 class DriverService {
   DriverService._();
@@ -29,7 +31,7 @@ class DriverService {
     return _fs.collection('drivers').doc(uid).snapshots();
   }
 
-  /// ✅ Add back this method (called in EditDriverPage)
+  /// Update driver profile
   Future<void> updateDriver({
     String? name,
     String? phone,
@@ -46,7 +48,7 @@ class DriverService {
 
   // ----------------- schedule / seats -----------------
 
-  /// ✅ Stream only THIS driver's trips for today (from driver_trips)
+  /// Only THIS driver's trips for today (from driver_trips)
   Stream<QuerySnapshot<Map<String, dynamic>>> todayTrips() {
     final uid = _uid()!;
     final ymd = _todayYmd();
@@ -55,6 +57,7 @@ class DriverService {
         .collection('driver_trips')
         .where('driverId', isEqualTo: uid)
         .where('date', isEqualTo: ymd)
+        .orderBy('time') // time: "HH:mm"
         .snapshots();
   }
 
@@ -66,7 +69,35 @@ class DriverService {
         .snapshots();
   }
 
-  // ----------------- issue reporting -----------------
+  // ----------------- issue reporting (callable) -----------------
+
+  /// Call the Cloud Function to notify students for the passed trip context
+  Future<void> reportIssueForTrip({
+    required String origin,
+    required String destination,
+    required String date,   // "YYYY-MM-DD"
+    required String time,   // "HH:mm"
+    required String type,
+    String? note,
+    int? delayMinutes,
+  }) async {
+    final functions = FirebaseFunctions.instanceFor(
+      app: Firebase.app(),
+      region: 'asia-southeast1',
+    );
+    final callable = functions.httpsCallable('reportDriverIssue');
+    await callable.call({
+      'origin': origin,
+      'destination': destination,
+      'date': date,
+      'time': time,
+      'type': type,
+      'note': note ?? '',
+      'delayMinutes': delayMinutes ?? 0,
+    });
+  }
+
+  // ----------------- legacy issue logging (kept if you still use it) -----------------
   Future<void> reportIssue({
     required String type,
     String? note,

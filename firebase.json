@@ -2,6 +2,7 @@
   "functions": [
     {
       "codebase": "default",
+      "source": "functions",
       "ignore": [
         "node_modules",
         ".git",
@@ -10,26 +11,16 @@
         "*.local"
       ],
       "predeploy": [
-        "npm --prefix \"$RESOURCE_DIR\" run lint"
-      ],
-      "source": "functions"
+        "npm --prefix \"$RESOURCE_DIR\" run lint",
+        "npm --prefix \"$RESOURCE_DIR\" run build"
+      ]
     }
   ],
   "emulators": {
-    "functions": {
-      "host": "127.0.0.1",
-      "port": 5001
-    },
-    "firestore": {
-      "port": 8080
-    },
-    "pubsub": {
-      "port": 8088
-    },
-    "ui": {
-      "enabled": true,
-      "port": 4000
-    },
+    "functions": { "host": "127.0.0.1", "port": 5001 },
+    "firestore": { "port": 8080 },
+    "pubsub": { "port": 8088 },
+    "ui": { "enabled": true, "port": 4000 },
     "singleProjectMode": true
   }
 }
