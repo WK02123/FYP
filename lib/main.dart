@@ -215,7 +215,7 @@ void main() async {
   await Stripe.instance.applySettings();
 
   // Emulator config (debug only)
-  await _configureLocalFunctionsIfDebug();
+   await _configureLocalFunctionsIfDebug();
 
   runApp(const MyApp());
 }

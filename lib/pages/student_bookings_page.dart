@@ -14,16 +14,16 @@ class _StudentsBookingsPageState extends State<StudentsBookingsPage> {
   final _fs = FirebaseFirestore.instance;
   final _auth = FirebaseAuth.instance;
 
-  // If true, we will delete past seats from DB + delete orphan trips.
+  /// If true, delete past seats in Firestore (and delete orphan /trips the student created).
   static const bool PURGE_PAST_FROM_DB = true;
 
-  // Cache trip docs to avoid repeat reads
+  /// Cache trips to avoid repeated reads (key = /trips docId)
   final Map<String, DocumentSnapshot<Map<String, dynamic>>> _tripCache = {};
 
   @override
   void initState() {
     super.initState();
-    _purgePastForUser(); // best-effort cleanup on open
+    _purgePastForUser(); // best-effort cleanup once the page opens
   }
 
   // -------------------- Trip cache --------------------
@@ -32,6 +32,8 @@ class _StudentsBookingsPageState extends State<StudentsBookingsPage> {
     if (_tripCache.containsKey(tripId)) return _tripCache[tripId];
 
     var snap = await _fs.collection('trips').doc(tripId).get();
+
+    // backward-compat: some older docs use a generated id and store "tripId" field
     if (!snap.exists) {
       final q = await _fs
           .collection('trips')
@@ -40,16 +42,21 @@ class _StudentsBookingsPageState extends State<StudentsBookingsPage> {
           .get();
       if (q.docs.isNotEmpty) snap = q.docs.first;
     }
+
     if (snap.exists) _tripCache[tripId] = snap;
     return snap.exists ? snap : null;
   }
 
   // -------------------- Time parsing --------------------
+  /// Returns a local DateTime from date (YYYY-MM-DD) and time which may be
+  /// "HH:mm" or "h:mm AM/PM". Returns null if it can’t parse.
   DateTime? _parseLocal(String date, String timeRaw) {
     if (date.isEmpty || timeRaw.isEmpty) return null;
     String t = timeRaw.trim();
-    final hasAmPm =
-    RegExp(r'(AM|PM)$', caseSensitive: false).hasMatch(t.replaceAll(' ', ''));
+
+    // AM/PM?
+    final hasAmPm = RegExp(r'(AM|PM)$', caseSensitive: false)
+        .hasMatch(t.replaceAll(' ', ''));
     if (hasAmPm) {
       final up = t.toUpperCase().replaceAll(' ', '');
       final am = up.endsWith('AM');
@@ -62,13 +69,15 @@ class _StudentsBookingsPageState extends State<StudentsBookingsPage> {
       if (am && h == 12) h = 0;
       t = '${h.toString().padLeft(2, '0')}:${m.toString().padLeft(2, '0')}';
     } else if (!t.contains(':')) {
+      // "13" -> "13:00"
       final hh = int.tryParse(t) ?? 0;
       t = '${hh.toString().padLeft(2, '0')}:00';
     }
+
     return DateTime.tryParse('${date}T$t:00');
   }
 
-  // -------------------- scheduleId variants --------------------
+  // -------------------- scheduleId variants (legacy support) --------------------
   List<String> _scheduleIdCandidates({
     required String origin,
     required String destination,
@@ -91,7 +100,8 @@ class _StudentsBookingsPageState extends State<StudentsBookingsPage> {
     final dstNo = noSpace(dst);
 
     final up = timeRaw.trim();
-    final hasAmPm = up.toUpperCase().endsWith('AM') || up.toUpperCase().endsWith('PM');
+    final hasAmPm =
+        up.toUpperCase().endsWith('AM') || up.toUpperCase().endsWith('PM');
     final t12 = hasAmPm ? up.toUpperCase() : to12h(up).toUpperCase();
     final t24NoColon = up.replaceAll(':', '');
     final t12NoSpace = t12.replaceAll(' ', '');
@@ -112,7 +122,7 @@ class _StudentsBookingsPageState extends State<StudentsBookingsPage> {
     return set.take(10).toList(); // Firestore whereIn limit
   }
 
-  // -------------------- Delete an entire trip safely --------------------
+  // -------------------- Delete a /trips doc and subcollections --------------------
   Future<void> _deleteTripCompletely(
       DocumentReference<Map<String, dynamic>> tripRef) async {
     final tripId = tripRef.id;
@@ -120,25 +130,30 @@ class _StudentsBookingsPageState extends State<StudentsBookingsPage> {
     // delete scans/*
     final scans = await tripRef.collection('scans').get();
     for (int i = 0; i < scans.docs.length; i += 400) {
-      final part = scans.docs
-          .sublist(i, (i + 400 > scans.docs.length) ? scans.docs.length : i + 400);
+      final part = scans.docs.sublist(
+          i, (i + 400 > scans.docs.length) ? scans.docs.length : i + 400);
       final b = _fs.batch();
-      for (final d in part) b.delete(d.reference);
+      for (final d in part) {
+        b.delete(d.reference);
+      }
       await b.commit();
     }
 
     // delete boardings with this tripId
-    final bq =
-    await _fs.collection('boardings').where('tripId', isEqualTo: tripId).get();
+    final bq = await _fs
+        .collection('boardings')
+        .where('tripId', isEqualTo: tripId)
+        .get();
     for (int i = 0; i < bq.docs.length; i += 400) {
       final part = bq.docs
           .sublist(i, (i + 400 > bq.docs.length) ? bq.docs.length : i + 400);
       final b = _fs.batch();
-      for (final d in part) b.delete(d.reference);
+      for (final d in part) {
+        b.delete(d.reference);
+      }
       await b.commit();
     }
 
-    // delete the trip itself
     await tripRef.delete();
   }
 
@@ -150,17 +165,18 @@ class _StudentsBookingsPageState extends State<StudentsBookingsPage> {
 
     final t = snap.data()!;
     final uid = _auth.currentUser?.uid;
-    // Only delete trip doc created by THIS student
+
+    // Only delete trips created by THIS student
     if (uid == null || (t['studentId'] ?? '') != uid) return;
 
     final origin = (t['origin'] ?? '').toString();
     final dest = (t['destination'] ?? '').toString();
     final time = (t['time'] ?? t['time12'] ?? '').toString();
 
-    // Check if ANY booked_seats remain (any user) for this trip
+    // Is there any seat left?
     bool anyLeft = false;
 
-    // a) direct reference by tripId (newer docs)
+    // a) modern linkage by tripId
     final qTripId = await _fs
         .collection('booked_seats')
         .where('tripId', isEqualTo: tripId)
@@ -170,8 +186,8 @@ class _StudentsBookingsPageState extends State<StudentsBookingsPage> {
 
     // b) legacy scheduleId variants
     if (!anyLeft && origin.isNotEmpty && dest.isNotEmpty && time.isNotEmpty) {
-      final cands =
-      _scheduleIdCandidates(origin: origin, destination: dest, timeRaw: time);
+      final cands = _scheduleIdCandidates(
+          origin: origin, destination: dest, timeRaw: time);
       for (int i = 0; i < cands.length && !anyLeft; i += 10) {
         final chunk =
         cands.sublist(i, (i + 10 > cands.length) ? cands.length : i + 10);
@@ -196,12 +212,14 @@ class _StudentsBookingsPageState extends State<StudentsBookingsPage> {
     final uid = _auth.currentUser?.uid;
     if (uid == null) return;
 
-    final snap =
-    await _fs.collection('booked_seats').where('studentId', isEqualTo: uid).get();
+    final snap = await _fs
+        .collection('booked_seats')
+        .where('studentId', isEqualTo: uid)
+        .get();
+
     if (snap.docs.isEmpty) return;
 
-    final toDelete =
-    <QueryDocumentSnapshot<Map<String, dynamic>>>[];
+    final toDelete = <QueryDocumentSnapshot<Map<String, dynamic>>>[];
     final affectedTripIds = <String>{};
 
     for (final d in snap.docs) {
@@ -209,27 +227,28 @@ class _StudentsBookingsPageState extends State<StudentsBookingsPage> {
       final tripId = (s['tripId'] ?? '').toString();
       affectedTripIds.add(tripId);
 
-      // prefer trip's date/time
+      // Prefer trip's canonical date/time
       String date = '';
       String time = '';
       final trip = await _getTrip(tripId);
       if (trip != null && trip.exists) {
         final t = trip.data()!;
         date = (t['date'] ?? '').toString();
-        time = (t['time'] ?? '').toString();
+        time = (t['time'] ?? t['time12'] ?? '').toString();
       }
       if (date.isEmpty) date = (s['date'] ?? '').toString();
-      if (time.isEmpty) {
-        time = (s['time'] ?? s['time12'] ?? s['time24'] ?? '').toString();
-      }
+      if (time.isEmpty) time = (s['time'] ?? s['time12'] ?? s['time24'] ?? '').toString();
 
       final dt = _parseLocal(date, time);
       if (dt == null) continue;
+
+      // leave 1-minute grace
       if (dt.isBefore(DateTime.now().subtract(const Duration(minutes: 1)))) {
         toDelete.add(d);
       }
     }
 
+    // Batch-delete past seats
     if (toDelete.isNotEmpty) {
       const chunk = 400;
       for (int i = 0; i < toDelete.length; i += chunk) {
@@ -245,7 +264,7 @@ class _StudentsBookingsPageState extends State<StudentsBookingsPage> {
       }
     }
 
-    // remove orphan trips for any affected tripIds
+    // Remove orphan /trips created by this student
     for (final tripId in affectedTripIds) {
       await _maybeDeleteOrphanTrip(tripId);
     }
@@ -269,11 +288,11 @@ class _StudentsBookingsPageState extends State<StudentsBookingsPage> {
     ((s['destination'] ?? trip?['destination']) ?? '').toString();
 
     final dt = _parseLocal(date, time);
-    if (dt == null) return null; // filter unparseable
+    if (dt == null) return null; // skip unparseable rows
 
     return _SeatRow(
-      id: seatDoc.id,                 // <- booked_seats doc id (important)
-      tripId: tripId,                 // <- /trips doc id
+      id: seatDoc.id, // booked_seats doc id
+      tripId: tripId, // /trips doc id
       seat: (s['seatNumber'] ?? '').toString(),
       date: date,
       time: time,
@@ -323,7 +342,8 @@ class _StudentsBookingsPageState extends State<StudentsBookingsPage> {
             return Center(
               child: Padding(
                 padding: const EdgeInsets.all(20),
-                child: Text('Error: ${snap.error}', textAlign: TextAlign.center),
+                child:
+                Text('Error: ${snap.error}', textAlign: TextAlign.center),
               ),
             );
           }
@@ -340,19 +360,23 @@ class _StudentsBookingsPageState extends State<StudentsBookingsPage> {
                 return const Center(child: CircularProgressIndicator());
               }
 
+              // Keep only upcoming (>= now - 1 min)
               final rows = rowsSnap.data
                   ?.whereType<_SeatRow>()
-                  .where((r) => !r.dt.isBefore(
-                  DateTime.now().subtract(const Duration(minutes: 1))))
+                  ?.where((r) => !r.dt
+                  .isBefore(DateTime.now().subtract(const Duration(minutes: 1))))
                   .toList() ??
                   [];
 
+              // Sort by soonest first
               rows.sort((a, b) => a.dt.compareTo(b.dt));
 
               if (rows.isEmpty) {
                 return const Center(
-                  child: Text('No upcoming bookings.',
-                      style: TextStyle(color: Colors.grey, fontSize: 16)),
+                  child: Text(
+                    'No upcoming bookings.',
+                    style: TextStyle(color: Colors.grey, fontSize: 16),
+                  ),
                 );
               }
 
@@ -371,8 +395,8 @@ class _StudentsBookingsPageState extends State<StudentsBookingsPage> {
 }
 
 class _SeatRow {
-  final String id;        // <- booked_seats doc id
-  final String tripId;    // <- /trips doc id
+  final String id;        // booked_seats doc id
+  final String tripId;    // /trips doc id
   final String seat;
   final String date;
   final String time;
@@ -407,7 +431,7 @@ class _BookingCard extends StatelessWidget {
         MaterialPageRoute(
           builder: (_) => BookingQrPage(
             tripId: row.tripId,
-            seatDocId: row.id, // 👈 pass the SPECIFIC seat doc id
+            seatDocId: row.id, // show QR for this specific seat
           ),
         ),
       );
@@ -418,7 +442,7 @@ class _BookingCard extends StatelessWidget {
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
       child: InkWell(
         borderRadius: BorderRadius.circular(14),
-        onTap: openQr, // tap the card to open QR for this seat
+        onTap: openQr,
         child: Padding(
           padding: const EdgeInsets.all(14),
           child: Row(
@@ -427,7 +451,8 @@ class _BookingCard extends StatelessWidget {
               CircleAvatar(
                 radius: 22,
                 backgroundColor: Colors.red.shade100,
-                child: const Icon(Icons.directions_bus, color: Color(0xFFD32F2F)),
+                child:
+                const Icon(Icons.directions_bus, color: Color(0xFFD32F2F)),
               ),
               const SizedBox(width: 12),
               Expanded(
@@ -436,7 +461,8 @@ class _BookingCard extends StatelessWidget {
                   children: [
                     Text(
                       '${row.origin.isEmpty ? '—' : row.origin} → ${row.destination.isEmpty ? '—' : row.destination}',
-                      style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 16),
+                      style: const TextStyle(
+                          fontWeight: FontWeight.w700, fontSize: 16),
                       overflow: TextOverflow.ellipsis,
                     ),
                     const SizedBox(height: 4),
@@ -457,7 +483,8 @@ class _BookingCard extends StatelessWidget {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    padding:
+                    const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                     decoration: BoxDecoration(
                       color: row.status == 'scheduled'
                           ? Colors.green.withOpacity(0.15)
@@ -483,7 +510,7 @@ class _BookingCard extends StatelessWidget {
                     constraints:
                     const BoxConstraints(minWidth: 28, minHeight: 28),
                     icon: const Icon(Icons.qr_code_2),
-                    onPressed: openQr, // also opens the same QR
+                    onPressed: openQr,
                   ),
                 ],
               ),

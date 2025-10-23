@@ -18,6 +18,39 @@ class DriverSchedulePage extends StatelessWidget {
     }
   }
 
+  // Convert "1:00 PM" -> "13:00"
+  String? _to24h(String? time12) {
+    if (time12 == null) return null;
+    final m = RegExp(r'^\s*(\d{1,2}):(\d{2})\s*(AM|PM)\s*$',
+        caseSensitive: false)
+        .firstMatch(time12);
+    if (m == null) return null;
+    var h = int.parse(m.group(1)!);
+    final mm = m.group(2)!;
+    final ap = m.group(3)!.toUpperCase();
+    if (ap == 'PM' && h < 12) h += 12;
+    if (ap == 'AM' && h == 12) h = 0;
+    return '${h.toString().padLeft(2, '0')}:$mm';
+  }
+
+  /// Combine trip's `date` (YYYY-MM-DD) and `time` (HH:mm or "h:mm AM/PM")
+  /// into a local DateTime. Returns null if it can’t parse.
+  DateTime? _tripDateTime(Map<String, dynamic> t) {
+    final date = (t['date'] ?? '').toString();
+    if (date.isEmpty) return null;
+
+    String? hhmm = t['time']?.toString();
+    hhmm ??= _to24h(t['time12']?.toString());
+    if (hhmm == null) return null;
+
+    try {
+      // ISO 8601 local time (seconds optional)
+      return DateTime.parse('${date}T$hhmm:00');
+    } catch (_) {
+      return null;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final svc = DriverService.instance;
@@ -29,7 +62,7 @@ class DriverSchedulePage extends StatelessWidget {
         foregroundColor: Colors.white,
       ),
       body: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-        // ✅ now reads from driver_trips via service
+        // reads from driver_trips via service (today)
         stream: svc.todayTrips(),
         builder: (context, snap) {
           if (snap.hasError) {
@@ -49,13 +82,30 @@ class DriverSchedulePage extends StatelessWidget {
             return const Center(child: CircularProgressIndicator());
           }
 
-          // driver_trips contains only driver-owned docs (no student copies)
-          final trips = (snap.data?.docs ?? []).toList();
+          final now = DateTime.now();
 
-          if (trips.isEmpty) {
+          // Filter out past trips and sort by time ascending
+          final upcoming = (snap.data?.docs ?? [])
+              .where((d) {
+            final t = d.data();
+            final dt = _tripDateTime(t);
+            if (dt == null) return true; // if we can’t parse, keep it visible
+            return !dt.isBefore(now);
+          })
+              .toList()
+            ..sort((a, b) {
+              final ta = _tripDateTime(a.data());
+              final tb = _tripDateTime(b.data());
+              if (ta == null && tb == null) return 0;
+              if (ta == null) return 1;
+              if (tb == null) return -1;
+              return ta.compareTo(tb);
+            });
+
+          if (upcoming.isEmpty) {
             return const Center(
               child: Text(
-                'No trips today',
+                'No upcoming trips',
                 style: TextStyle(color: Colors.grey, fontSize: 16),
               ),
             );
@@ -63,10 +113,10 @@ class DriverSchedulePage extends StatelessWidget {
 
           return ListView.separated(
             padding: const EdgeInsets.all(12),
-            itemCount: trips.length,
+            itemCount: upcoming.length,
             separatorBuilder: (_, __) => const SizedBox(height: 8),
             itemBuilder: (context, i) {
-              final doc = trips[i];
+              final doc = upcoming[i];
               final t = doc.data();
               final tripId = doc.id;
 
@@ -90,7 +140,7 @@ class DriverSchedulePage extends StatelessWidget {
                   ),
                   subtitle: Text('$origin → $dest'),
 
-                  // live booked-seat count (booked_seats.tripId == driver_trips doc id)
+                  // live booked-seat count
                   trailing: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
                     stream: DriverService.instance.seatsForTrip(tripId),
                     builder: (context, seatSnap) {

@@ -30,8 +30,15 @@ const scheduler_1 = require("firebase-functions/v2/scheduler");
 const firestore_1 = require("firebase-functions/v2/firestore");
 const v2_1 = require("firebase-functions/v2");
 const dotenv = __importStar(require("dotenv"));
-dotenv.config();
+const admin = __importStar(require("firebase-admin"));
 const params_1 = require("firebase-functions/params");
+dotenv.config();
+const REGION = "asia-southeast1";
+// Firebase Admin — initialize once
+if (!admin.apps.length) {
+    admin.initializeApp();
+    v2_1.logger.info("✅ firebase-admin initialized");
+}
 // ─────────────────────────────────────────────────────────────
 // Secrets (set in prod with CLI):
 //   firebase functions:secrets:set STRIPE_SECRET
@@ -62,7 +69,6 @@ const SENDGRID_API_KEY = (0, params_1.defineSecret)("SENDGRID_API_KEY");
 // ─────────────────────────────────────────────────────────────
 // Firebase Admin — initialize at module load
 // ─────────────────────────────────────────────────────────────
-const admin = __importStar(require("firebase-admin"));
 if (!admin.apps.length) {
     admin.initializeApp();
     v2_1.logger.info("✅ firebase-admin initialized");
@@ -70,7 +76,6 @@ if (!admin.apps.length) {
 // ─────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────
-const REGION = "asia-southeast1";
 const getStripe = () => {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const Stripe = require("stripe");
@@ -626,57 +631,58 @@ exports.testPushNotification = (0, https_1.onRequest)({ region: REGION }, async 
 exports.reportDriverIssue = (0, https_1.onCall)({ region: REGION }, async (request) => {
     if (!request.auth)
         throw new https_1.HttpsError("unauthenticated", "Sign in required");
-    // Driver passes the exact trip context for the nearest schedule
     const { origin, destination, date, time, type, note, delayMinutes } = (request.data ?? {});
     if (!origin || !destination || !date || !time) {
         throw new https_1.HttpsError("invalid-argument", "origin, destination, date, time are required");
     }
     try {
         const db = admin.firestore();
-        // 1) Log the issue (optional but useful)
+        const driverId = request.auth.uid;
+        // 1) Log the issue
         await db.collection("driver_issues").add({
-            driverId: request.auth.uid,
-            origin, destination, date, time,
+            driverId,
+            origin,
+            destination,
+            date,
+            time,
             type: type ?? "Issue",
             note: note ?? "",
             delayMinutes: delayMinutes ?? 0,
-            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            // 🔧 Use plain Date to avoid FieldValue/Timestamp API differences
+            createdAt: new Date(),
         });
-        // 2) Find students booked on the same trip (exact match on equality fields → no composite index needed)
+        // 2) Find students for that exact trip
         const qs = await db.collection("student_trips")
             .where("origin", "==", origin)
             .where("destination", "==", destination)
-            .where("date", "==", date) // "YYYY-MM-DD"
-            .where("time", "==", time) // "HH:mm"
+            .where("date", "==", date) // e.g. "2025-10-23"
+            .where("time", "==", time) // e.g. "12:00" or "12:00 PM" (must match stored format)
             .get();
         if (qs.empty) {
             v2_1.logger.info(`reportDriverIssue: no students for ${origin}→${destination} ${date} ${time}`);
             return { success: true, sent: 0 };
         }
-        // 3) Message text
-        const delayText = (delayMinutes && delayMinutes > 0) ? ` (~${delayMinutes} min delay)` : "";
+        // 3) Build message
+        const delayText = delayMinutes && delayMinutes > 0 ? ` (~${delayMinutes} min delay)` : "";
         const body = `Route ${origin} → ${destination} at ${time} will be delayed${delayText}. ${type ?? "Issue"} reported by driver.`;
+        // 4) Notify each student
         let sent = 0;
         for (const doc of qs.docs) {
             const trip = doc.data();
             const studentId = trip.studentId;
             if (!studentId)
                 continue;
-            // Resolve FCM (users > students > profiles > drivers)
-            const { fcmToken } = await (async () => {
-                const tried = [];
-                const cols = ["users", "students", "profiles", "drivers"];
-                for (const col of cols) {
-                    tried.push(`${col}/${studentId}`);
-                    const d = await db.collection(col).doc(studentId).get();
-                    if (d.exists) {
-                        const t = d.data()?.fcmToken;
-                        if (t)
-                            return { fcmToken: t, tried };
-                    }
+            // Resolve FCM: users > students > profiles > drivers
+            const collectionsToCheck = ["users", "students", "profiles", "drivers"];
+            let fcmToken = null;
+            for (const col of collectionsToCheck) {
+                const d = await db.collection(col).doc(studentId).get();
+                if (d.exists) {
+                    fcmToken = d.data()?.fcmToken ?? null;
+                    if (fcmToken)
+                        break;
                 }
-                return { fcmToken: null, tried };
-            })();
+            }
             if (!fcmToken)
                 continue;
             await admin.messaging().send({

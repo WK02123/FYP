@@ -24,6 +24,9 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
   final _busCodeCtrl = TextEditingController();
   final _driverIdCtrl = TextEditingController();
 
+  // 🆕 Price (shown in RM, stored as priceSen in Firestore)
+  final _priceCtrl = TextEditingController(text: '5.00'); // RM 5.00 default
+
   @override
   void initState() {
     super.initState();
@@ -35,6 +38,7 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
     _capacityCtrl.dispose();
     _busCodeCtrl.dispose();
     _driverIdCtrl.dispose();
+    _priceCtrl.dispose();
     super.dispose();
   }
 
@@ -57,6 +61,7 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
       _capacityCtrl.text = '15';
       _busCodeCtrl.text = '';
       _driverIdCtrl.text = '';
+      _priceCtrl.text = '5.00';
     });
 
     final doc = await _fs.collection('routes').doc(key).get();
@@ -69,6 +74,13 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
       _capacityCtrl.text = _capacity.toString();
       _busCodeCtrl.text = (data['busCode'] ?? '').toString();
       _driverIdCtrl.text = (data['driverId'] ?? '').toString();
+
+      // 🆕 load priceSen -> RM text
+      final priceSen = (data['priceSen'] as num?)?.toInt();
+      if (priceSen != null && priceSen >= 0) {
+        _priceCtrl.text = (priceSen / 100).toStringAsFixed(2);
+      }
+
       setState(() {});
     } else {
       // not exist yet — keep defaults until saved
@@ -81,6 +93,7 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
     final o = TextEditingController();
     final d = TextEditingController();
     final b = TextEditingController();
+    final p = TextEditingController(text: '5.00');
 
     final ok = await showDialog<bool>(
       context: context,
@@ -94,6 +107,16 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
             TextField(controller: d, decoration: const InputDecoration(labelText: 'Destination', border: OutlineInputBorder())),
             const SizedBox(height: 10),
             TextField(controller: b, decoration: const InputDecoration(labelText: 'Bus Code (e.g. INTI-01)', border: OutlineInputBorder())),
+            const SizedBox(height: 10),
+            TextField(
+              controller: p,
+              keyboardType: const TextInputType.numberWithOptions(decimal: true),
+              decoration: const InputDecoration(
+                labelText: 'Price (RM)',
+                hintText: 'e.g. 5.00',
+                border: OutlineInputBorder(),
+              ),
+            ),
           ],
         ),
         actions: [
@@ -111,11 +134,14 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
     final key = '${o.text.trim()}|${d.text.trim()}';
     if (key == '|' || key.trim().isEmpty) return;
 
+    final priceSen = _parsePriceToSen(p.text);
+
     await _fs.collection('routes').doc(key).set({
       'busCode': b.text.trim(),
       'capacity': 15,
       'times': [],
       'active': true,
+      'priceSen': priceSen, // 🆕
       'updatedAt': FieldValue.serverTimestamp(),
     }, SetOptions(merge: true));
 
@@ -171,10 +197,13 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
       return;
     }
 
+    final priceSen = _parsePriceToSen(_priceCtrl.text);
+
     await _fs.collection('routes').doc(_selectedRouteKey).set({
       'capacity': cap,
       'busCode': _busCodeCtrl.text.trim(),
       'driverId': _driverIdCtrl.text.trim(), // optional
+      'priceSen': priceSen, // 🆕 save as integer (sen)
       'updatedAt': FieldValue.serverTimestamp(),
     }, SetOptions(merge: true));
 
@@ -182,7 +211,15 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
     ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Saved')));
   }
 
-  // helpers: format & sort times
+  // helpers: price, format & sort times
+  int _parsePriceToSen(String input) {
+    // Accept "5", "5.0", "5.00", "  5.50 RM " etc.
+    final cleaned = input.replaceAll(RegExp(r'[^0-9\.,]'), '').replaceAll(',', '.');
+    final v = double.tryParse(cleaned) ?? 0.0;
+    final sen = (v * 100).round();
+    return sen < 0 ? 0 : sen;
+  }
+
   String _format12(TimeOfDay tod) {
     final h = tod.hourOfPeriod == 0 ? 12 : tod.hourOfPeriod;
     final m = tod.minute.toString().padLeft(2, '0');
@@ -255,7 +292,7 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
               Expanded(
                 child: ListView(
                   children: [
-                    // capacity / busCode / driverId
+                    // capacity / busCode
                     Row(
                       children: [
                         Expanded(
@@ -285,6 +322,23 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
                       ],
                     ),
                     const SizedBox(height: 12),
+
+                    // 🆕 Price (RM)
+                    TextFormField(
+                      controller: _priceCtrl,
+                      keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                      decoration: const InputDecoration(
+                        labelText: 'Price (RM)',
+                        hintText: 'e.g. 5.00',
+                        helperText: 'Students will be charged this amount per seat.',
+                        filled: true,
+                        fillColor: Color(0xFFF5F5F5),
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+
+                    // driver id (optional)
                     TextFormField(
                       controller: _driverIdCtrl,
                       decoration: const InputDecoration(
@@ -296,12 +350,24 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
                       ),
                     ),
                     const SizedBox(height: 12),
+
                     ElevatedButton.icon(
                       onPressed: _saveMeta,
                       icon: const Icon(Icons.save),
                       label: const Text('Save Route Settings'),
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(0xFFD32F2F),
+                        backgroundColor: const Color(0xFFD32F2F), // red pill
+                        foregroundColor: Colors.white,            // <-- force visible text/icon
+                        minimumSize: const Size.fromHeight(48),   // nicer tap target
+                        // nicer tap target
+
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                        textStyle: const TextStyle(
+                          fontWeight: FontWeight.w600,
+                          letterSpacing: .2,
+                        ),
                       ),
                     ),
                     const SizedBox(height: 18),

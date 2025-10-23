@@ -1,8 +1,7 @@
 // lib/pages/driver_service.dart
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_functions/cloud_functions.dart';
-import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 
 class DriverService {
   DriverService._();
@@ -19,6 +18,17 @@ class DriverService {
     return '$y-$m-$d';
   }
 
+  DateTime? _todayAt(String? hhmm) {
+    if (hhmm == null || !hhmm.contains(':')) return null;
+    final parts = hhmm.split(':');
+    if (parts.length != 2) return null;
+    final h = int.tryParse(parts[0]);
+    final m = int.tryParse(parts[1]);
+    if (h == null || m == null) return null;
+    final now = DateTime.now();
+    return DateTime(now.year, now.month, now.day, h, m);
+  }
+
   String? _uid() => FirebaseAuth.instance.currentUser?.uid;
   String? _email() => FirebaseAuth.instance.currentUser?.email;
 
@@ -31,7 +41,7 @@ class DriverService {
     return _fs.collection('drivers').doc(uid).snapshots();
   }
 
-  /// Update driver profile
+  /// ✅ Add back this method (called in EditDriverPage)
   Future<void> updateDriver({
     String? name,
     String? phone,
@@ -48,7 +58,7 @@ class DriverService {
 
   // ----------------- schedule / seats -----------------
 
-  /// Only THIS driver's trips for today (from driver_trips)
+  /// ✅ Stream only THIS driver's trips for today (from driver_trips)
   Stream<QuerySnapshot<Map<String, dynamic>>> todayTrips() {
     final uid = _uid()!;
     final ymd = _todayYmd();
@@ -57,7 +67,6 @@ class DriverService {
         .collection('driver_trips')
         .where('driverId', isEqualTo: uid)
         .where('date', isEqualTo: ymd)
-        .orderBy('time') // time: "HH:mm"
         .snapshots();
   }
 
@@ -69,35 +78,9 @@ class DriverService {
         .snapshots();
   }
 
-  // ----------------- issue reporting (callable) -----------------
+  // ----------------- issue reporting -----------------
 
-  /// Call the Cloud Function to notify students for the passed trip context
-  Future<void> reportIssueForTrip({
-    required String origin,
-    required String destination,
-    required String date,   // "YYYY-MM-DD"
-    required String time,   // "HH:mm"
-    required String type,
-    String? note,
-    int? delayMinutes,
-  }) async {
-    final functions = FirebaseFunctions.instanceFor(
-      app: Firebase.app(),
-      region: 'asia-southeast1',
-    );
-    final callable = functions.httpsCallable('reportDriverIssue');
-    await callable.call({
-      'origin': origin,
-      'destination': destination,
-      'date': date,
-      'time': time,
-      'type': type,
-      'note': note ?? '',
-      'delayMinutes': delayMinutes ?? 0,
-    });
-  }
-
-  // ----------------- legacy issue logging (kept if you still use it) -----------------
+  /// Your existing "log issue" method (kept as-is).
   Future<void> reportIssue({
     required String type,
     String? note,
@@ -114,6 +97,82 @@ class DriverService {
       'tripId': tripId,
       'status': 'open',
       'createdAt': FieldValue.serverTimestamp(),
+    });
+  }
+
+  /// 🔔 NEW: report issue AND notify students on the nearest schedule today.
+  /// Uses your deployed callable: `reportDriverIssue`.
+  Future<void> reportIssueAndNotify({
+    required String type,
+    String? note,
+    int? delayMinutes,
+  }) async {
+    final uid = _uid();
+    if (uid == null) throw Exception('Not signed in.');
+
+    // 1) Log into your local "issues" collection (kept, optional for audit).
+    await reportIssue(type: type, note: note);
+
+    // 2) Fetch today's driver trips (same query you already use).
+    final ymd = _todayYmd();
+    final qs = await _fs
+        .collection('driver_trips')
+        .where('driverId', isEqualTo: uid)
+        .where('date', isEqualTo: ymd)
+        .get();
+
+    if (qs.docs.isEmpty) {
+      // Nothing to notify for today.
+      return;
+    }
+
+    // 3) Pick the nearest schedule (the soonest time >= now; otherwise the latest past one).
+    final now = DateTime.now();
+    Map<String, dynamic>? chosen;
+    DateTime? chosenTime;
+    for (final d in qs.docs) {
+      final data = d.data();
+      final dt = _todayAt(data['time']?.toString());
+      if (dt == null) continue;
+      // choose the soonest that is >= now
+      if (!dt.isBefore(now) && (chosenTime == null || dt.isBefore(chosenTime!))) {
+        chosen = data;
+        chosenTime = dt;
+      }
+    }
+    // If none upcoming, fallback to the trip with the latest time today
+    chosen ??= (() {
+      DateTime? latest;
+      Map<String, dynamic>? pick;
+      for (final d in qs.docs) {
+        final data = d.data();
+        final dt = _todayAt(data['time']?.toString());
+        if (dt == null) continue;
+        if (latest == null || dt.isAfter(latest)) {
+          latest = dt;
+          pick = data;
+        }
+      }
+      return pick;
+    })();
+
+    if (chosen == null) {
+      // Could not parse any time field safely.
+      return;
+    }
+
+    // 4) Call the Cloud Function to fan out to students on that exact route/time.
+    final callable = FirebaseFunctions.instanceFor(region: 'asia-southeast1')
+        .httpsCallable('reportDriverIssue');
+
+    await callable.call(<String, dynamic>{
+      'origin': chosen['origin'] ?? '',
+      'destination': chosen['destination'] ?? '',
+      'date': chosen['date'] ?? ymd, // YYYY-MM-DD
+      'time': chosen['time'] ?? '',  // HH:mm
+      'type': type,
+      'note': (note ?? '').trim(),
+      'delayMinutes': delayMinutes ?? 0,
     });
   }
 

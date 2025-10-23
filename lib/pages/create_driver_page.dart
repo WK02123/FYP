@@ -110,10 +110,16 @@ class _CreateDriverPageState extends State<CreateDriverPage> {
           ],
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
           ElevatedButton(
             onPressed: () => Navigator.pop(context, true),
-            style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFFD32F2F)),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFFD32F2F),
+              foregroundColor: Colors.white, // ensure text is visible
+            ),
             child: const Text('Save'),
           ),
         ],
@@ -136,10 +142,12 @@ class _CreateDriverPageState extends State<CreateDriverPage> {
       await _loadRoutes();
       setState(() => _selectedRouteKeys.add(key));
 
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Route "$key" added')),
       );
     } catch (e) {
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Failed to add route: $e')),
       );
@@ -163,7 +171,7 @@ class _CreateDriverPageState extends State<CreateDriverPage> {
       name: _name.text,
       phone: _phone.text,
       busCode: _bus.text,
-      routes: _selectedRouteKeys.toList(), // <-- pass selected routes
+      routes: _selectedRouteKeys.toList(), // pass selected routes
       attachDriverToRoutes: true,          // also write driverId into those route docs
       sendVerification: _sendVerification,
     );
@@ -260,8 +268,16 @@ class _CreateDriverPageState extends State<CreateDriverPage> {
               icon: const Icon(Icons.person_add),
               label: const Text('Create Driver'),
               style: ElevatedButton.styleFrom(
-                minimumSize: const Size.fromHeight(48),
                 backgroundColor: const Color(0xFFD32F2F),
+                foregroundColor: Colors.white, // <-- fix: make text/icon visible
+                minimumSize: const Size.fromHeight(48),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                textStyle: const TextStyle(
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: .2,
+                ),
               ),
             ),
           ],
