@@ -29,33 +29,21 @@ const SENDGRID_API_KEY = defineSecret("SENDGRID_API_KEY");
 // ─────────────────────────────────────────────────────────────
 // Load .env.local only when running the emulator
 // ─────────────────────────────────────────────────────────────
-(() => {
-  try {
-    const isEmulator =
-      process.env.FUNCTIONS_EMULATOR === "true" ||
-      process.env.FIREBASE_EMULATOR_HUB !== undefined;
+import * as path from "path";
 
-    if (isEmulator) {
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const path = require("path");
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const dotenvLocal = require("dotenv");
-      dotenvLocal.config({ path: path.join(__dirname, "..", ".env.local") });
-      logger.info("✅ .env.local loaded for emulator");
-    }
-  } catch (e) {
-    logger.warn("⚠️ .env.local load skipped:", e);
-  }
-})();
 
-// ─────────────────────────────────────────────────────────────
-// Firebase Admin — initialize at module load
-// ─────────────────────────────────────────────────────────────
+const IS_EMULATOR =
+  process.env.FUNCTIONS_EMULATOR === "true" ||
+  process.env.FIREBASE_EMULATOR_HUB !== undefined;
 
-if (!admin.apps.length) {
-  admin.initializeApp();
-  logger.info("✅ firebase-admin initialized");
+// load .env.local only in emulator
+if (IS_EMULATOR) {
+  dotenv.config({ path: path.join(__dirname, "..", ".env.local") });
 }
+
+
+
+
 
 // ─────────────────────────────────────────────────────────────
 // Helpers
@@ -840,5 +828,54 @@ export const reportDriverIssue = onCall({ region: REGION }, async (request) => {
     throw new HttpsError("internal", e?.message ?? "Failed to process driver issue");
   }
 });
+
+// --- Directions API secret + helper (ADD) ---
+const GOOGLE_DIRECTIONS_KEY = defineSecret("GOOGLE_DIRECTIONS_KEY");
+export const directions = onRequest(
+  { region: REGION, secrets: [GOOGLE_DIRECTIONS_KEY] },
+  async (req, res) => {
+    try {
+      const origin = (req.query.origin as string) || "";
+      const destination = (req.query.destination as string) || "";
+      const mode = ((req.query.mode as string) || "driving").toLowerCase();
+
+      if (!origin || !destination) {
+        res.status(400).json({ status: "INVALID_REQUEST", error: "origin and destination are required" });
+        return;
+      }
+
+      // Emulator vs prod: pick the key
+      const isEmulator =
+        process.env.FUNCTIONS_EMULATOR === "true" ||
+        process.env.FIREBASE_EMULATOR_HUB !== undefined;
+
+      const key = isEmulator
+        ? process.env.GOOGLE_DIRECTIONS_KEY
+        : GOOGLE_DIRECTIONS_KEY.value();
+
+      if (!key) {
+        res.status(500).json({ status: "INTERNAL", error: "GOOGLE_DIRECTIONS_KEY not configured" });
+        return;
+      }
+
+      // Call Google Directions
+      const url = new URL("https://maps.googleapis.com/maps/api/directions/json");
+      url.searchParams.set("origin", origin);            // "lat,lng"
+      url.searchParams.set("destination", destination);  // "lat,lng"
+      url.searchParams.set("mode", mode);                // driving/walking/transit
+      url.searchParams.set("key", key);
+
+      const gRes = await fetch(url.toString());
+      const gJson = await gRes.json();
+
+      res.status(200).json(gJson);
+    } catch (e: any) {
+      res.status(500).json({ status: "INTERNAL", error: e?.message ?? String(e) });
+    }
+  }
+);
+
+
+
 
 

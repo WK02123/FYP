@@ -23,7 +23,7 @@ var __importStar = (this && this.__importStar) || function (mod) {
     return result;
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.reportDriverIssue = exports.testPushNotification = exports.testScheduledNotifications = exports.runScheduledOnce = exports.checkScheduledNotifications = exports.sendTripReminder = exports.sendCancellationEmail = exports.sendBookingEmail = exports.refundPayment = exports.createPaymentIntent = exports.hello = exports.onStudentTripCreated = void 0;
+exports.directions = exports.reportDriverIssue = exports.testPushNotification = exports.testScheduledNotifications = exports.runScheduledOnce = exports.checkScheduledNotifications = exports.sendTripReminder = exports.sendCancellationEmail = exports.sendBookingEmail = exports.refundPayment = exports.createPaymentIntent = exports.hello = exports.onStudentTripCreated = void 0;
 // functions/src/index.ts
 const https_1 = require("firebase-functions/v2/https");
 const scheduler_1 = require("firebase-functions/v2/scheduler");
@@ -49,29 +49,12 @@ const SENDGRID_API_KEY = (0, params_1.defineSecret)("SENDGRID_API_KEY");
 // ─────────────────────────────────────────────────────────────
 // Load .env.local only when running the emulator
 // ─────────────────────────────────────────────────────────────
-(() => {
-    try {
-        const isEmulator = process.env.FUNCTIONS_EMULATOR === "true" ||
-            process.env.FIREBASE_EMULATOR_HUB !== undefined;
-        if (isEmulator) {
-            // eslint-disable-next-line @typescript-eslint/no-var-requires
-            const path = require("path");
-            // eslint-disable-next-line @typescript-eslint/no-var-requires
-            const dotenvLocal = require("dotenv");
-            dotenvLocal.config({ path: path.join(__dirname, "..", ".env.local") });
-            v2_1.logger.info("✅ .env.local loaded for emulator");
-        }
-    }
-    catch (e) {
-        v2_1.logger.warn("⚠️ .env.local load skipped:", e);
-    }
-})();
-// ─────────────────────────────────────────────────────────────
-// Firebase Admin — initialize at module load
-// ─────────────────────────────────────────────────────────────
-if (!admin.apps.length) {
-    admin.initializeApp();
-    v2_1.logger.info("✅ firebase-admin initialized");
+const path = __importStar(require("path"));
+const IS_EMULATOR = process.env.FUNCTIONS_EMULATOR === "true" ||
+    process.env.FIREBASE_EMULATOR_HUB !== undefined;
+// load .env.local only in emulator
+if (IS_EMULATOR) {
+    dotenv.config({ path: path.join(__dirname, "..", ".env.local") });
 }
 // ─────────────────────────────────────────────────────────────
 // Helpers
@@ -706,5 +689,40 @@ exports.reportDriverIssue = (0, https_1.onCall)({ region: REGION }, async (reque
     catch (e) {
         v2_1.logger.error("reportDriverIssue error:", e);
         throw new https_1.HttpsError("internal", e?.message ?? "Failed to process driver issue");
+    }
+});
+// --- Directions API secret + helper (ADD) ---
+const GOOGLE_DIRECTIONS_KEY = (0, params_1.defineSecret)("GOOGLE_DIRECTIONS_KEY");
+exports.directions = (0, https_1.onRequest)({ region: REGION, secrets: [GOOGLE_DIRECTIONS_KEY] }, async (req, res) => {
+    try {
+        const origin = req.query.origin || "";
+        const destination = req.query.destination || "";
+        const mode = (req.query.mode || "driving").toLowerCase();
+        if (!origin || !destination) {
+            res.status(400).json({ status: "INVALID_REQUEST", error: "origin and destination are required" });
+            return;
+        }
+        // Emulator vs prod: pick the key
+        const isEmulator = process.env.FUNCTIONS_EMULATOR === "true" ||
+            process.env.FIREBASE_EMULATOR_HUB !== undefined;
+        const key = isEmulator
+            ? process.env.GOOGLE_DIRECTIONS_KEY
+            : GOOGLE_DIRECTIONS_KEY.value();
+        if (!key) {
+            res.status(500).json({ status: "INTERNAL", error: "GOOGLE_DIRECTIONS_KEY not configured" });
+            return;
+        }
+        // Call Google Directions
+        const url = new URL("https://maps.googleapis.com/maps/api/directions/json");
+        url.searchParams.set("origin", origin); // "lat,lng"
+        url.searchParams.set("destination", destination); // "lat,lng"
+        url.searchParams.set("mode", mode); // driving/walking/transit
+        url.searchParams.set("key", key);
+        const gRes = await fetch(url.toString());
+        const gJson = await gRes.json();
+        res.status(200).json(gJson);
+    }
+    catch (e) {
+        res.status(500).json({ status: "INTERNAL", error: e?.message ?? String(e) });
     }
 });
