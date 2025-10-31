@@ -13,6 +13,15 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 
 import 'pages/login_page.dart';
 
+/// ---------- NEW: ensureSignedIn helper (anonymous sign-in) ----------
+Future<void> ensureSignedIn() async {
+  final auth = FirebaseAuth.instance;
+  if (auth.currentUser == null) {
+    await auth.signInAnonymously();
+  }
+}
+/// -------------------------------------------------------------------
+
 /// Single global instance of flutter_local_notifications
 final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
 FlutterLocalNotificationsPlugin();
@@ -208,6 +217,10 @@ void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp();
 
+  // ---------- NEW: make sure we’re authenticated for Firestore rules ----------
+  await ensureSignedIn(); // 👈 anonymous sign-in if needed
+  // ---------------------------------------------------------------------------
+
   // Stripe (keep your keys)
   Stripe.publishableKey =
   'pk_test_51SIgpbLQwmM1oR5kPismRY1vyNP7qYAgpXyDRb0Kj576pvL86AHx8bMIKavym2dee7Fb21Eo9UR9xSQWqLOtWYrb00Tz99PoEL';
@@ -215,7 +228,7 @@ void main() async {
   await Stripe.instance.applySettings();
 
   // Emulator config (debug only)
-   await _configureLocalFunctionsIfDebug();
+  await _configureLocalFunctionsIfDebug();
 
   runApp(const MyApp());
 }
@@ -261,7 +274,7 @@ class _BootstrapState extends State<_Bootstrap> {
       await printFCMToken();
     });
 
-    // 🔑 Keep FCM token in Firestore when auth changes
+    // 🔑 Keep FCM token in Firestore when auth changes (includes anonymous)
     _authSub = FirebaseAuth.instance.authStateChanges();
     _authSub.listen((user) async {
       if (user == null) {

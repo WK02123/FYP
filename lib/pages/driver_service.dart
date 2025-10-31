@@ -1,15 +1,22 @@
 // lib/pages/driver_service.dart
+import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:geolocator/geolocator.dart';
 
 class DriverService {
   DriverService._();
   static final instance = DriverService._();
 
   final _fs = FirebaseFirestore.instance;
+  final _auth = FirebaseAuth.instance;
+  StreamSubscription<Position>? _posSub;
 
-  // ----------------- helpers -----------------
+  // Cache the latest busCode so we can publish it with location updates
+  String? _busCodeCached;
+
+  // ----------------- Helpers -----------------
   String _todayYmd() {
     final now = DateTime.now();
     final y = now.year.toString().padLeft(4, '0');
@@ -29,19 +36,16 @@ class DriverService {
     return DateTime(now.year, now.month, now.day, h, m);
   }
 
-  String? _uid() => FirebaseAuth.instance.currentUser?.uid;
-  String? _email() => FirebaseAuth.instance.currentUser?.email;
+  String? _uid() => _auth.currentUser?.uid;
+  String? _email() => _auth.currentUser?.email;
 
-  // ----------------- driver profile -----------------
-
-  /// Live stream of the current driver's profile document.
+  // ----------------- Driver Profile -----------------
   Stream<DocumentSnapshot<Map<String, dynamic>>> driverStream() {
     final uid = _uid();
     if (uid == null) return const Stream.empty();
     return _fs.collection('drivers').doc(uid).snapshots();
   }
 
-  /// ✅ Add back this method (called in EditDriverPage)
   Future<void> updateDriver({
     String? name,
     String? phone,
@@ -56,13 +60,10 @@ class DriverService {
     }, SetOptions(merge: true));
   }
 
-  // ----------------- schedule / seats -----------------
-
-  /// ✅ Stream only THIS driver's trips for today (from driver_trips)
+  // ----------------- Trip & Seats -----------------
   Stream<QuerySnapshot<Map<String, dynamic>>> todayTrips() {
     final uid = _uid()!;
     final ymd = _todayYmd();
-
     return _fs
         .collection('driver_trips')
         .where('driverId', isEqualTo: uid)
@@ -70,7 +71,6 @@ class DriverService {
         .snapshots();
   }
 
-  /// Stream of booked seats for a given (driver) trip id.
   Stream<QuerySnapshot<Map<String, dynamic>>> seatsForTrip(String tripId) {
     return _fs
         .collection('booked_seats')
@@ -78,9 +78,7 @@ class DriverService {
         .snapshots();
   }
 
-  // ----------------- issue reporting -----------------
-
-  /// Your existing "log issue" method (kept as-is).
+  // ----------------- Issue Reporting -----------------
   Future<void> reportIssue({
     required String type,
     String? note,
@@ -100,8 +98,6 @@ class DriverService {
     });
   }
 
-  /// 🔔 NEW: report issue AND notify students on the nearest schedule today.
-  /// Uses your deployed callable: `reportDriverIssue`.
   Future<void> reportIssueAndNotify({
     required String type,
     String? note,
@@ -110,10 +106,8 @@ class DriverService {
     final uid = _uid();
     if (uid == null) throw Exception('Not signed in.');
 
-    // 1) Log into your local "issues" collection (kept, optional for audit).
     await reportIssue(type: type, note: note);
 
-    // 2) Fetch today's driver trips (same query you already use).
     final ymd = _todayYmd();
     final qs = await _fs
         .collection('driver_trips')
@@ -121,26 +115,23 @@ class DriverService {
         .where('date', isEqualTo: ymd)
         .get();
 
-    if (qs.docs.isEmpty) {
-      // Nothing to notify for today.
-      return;
-    }
+    if (qs.docs.isEmpty) return;
 
-    // 3) Pick the nearest schedule (the soonest time >= now; otherwise the latest past one).
     final now = DateTime.now();
     Map<String, dynamic>? chosen;
     DateTime? chosenTime;
+
     for (final d in qs.docs) {
       final data = d.data();
       final dt = _todayAt(data['time']?.toString());
       if (dt == null) continue;
-      // choose the soonest that is >= now
-      if (!dt.isBefore(now) && (chosenTime == null || dt.isBefore(chosenTime!))) {
+      if (!dt.isBefore(now) &&
+          (chosenTime == null || dt.isBefore(chosenTime!))) {
         chosen = data;
         chosenTime = dt;
       }
     }
-    // If none upcoming, fallback to the trip with the latest time today
+
     chosen ??= (() {
       DateTime? latest;
       Map<String, dynamic>? pick;
@@ -156,27 +147,105 @@ class DriverService {
       return pick;
     })();
 
-    if (chosen == null) {
-      // Could not parse any time field safely.
-      return;
-    }
+    if (chosen == null) return;
 
-    // 4) Call the Cloud Function to fan out to students on that exact route/time.
     final callable = FirebaseFunctions.instanceFor(region: 'asia-southeast1')
         .httpsCallable('reportDriverIssue');
 
     await callable.call(<String, dynamic>{
       'origin': chosen['origin'] ?? '',
       'destination': chosen['destination'] ?? '',
-      'date': chosen['date'] ?? ymd, // YYYY-MM-DD
-      'time': chosen['time'] ?? '',  // HH:mm
+      'date': chosen['date'] ?? ymd,
+      'time': chosen['time'] ?? '',
       'type': type,
       'note': (note ?? '').trim(),
       'delayMinutes': delayMinutes ?? 0,
     });
   }
 
-  // ----------------- leave requests -----------------
+  // ----------------- Live Location Sharing -----------------
+  Future<void> _ensurePerms() async {
+    final serviceEnabled = await Geolocator.isLocationServiceEnabled();
+    if (!serviceEnabled) throw 'Please enable location services';
+
+    var perm = await Geolocator.checkPermission();
+    if (perm == LocationPermission.denied) {
+      perm = await Geolocator.requestPermission();
+    }
+    if (perm == LocationPermission.denied ||
+        perm == LocationPermission.deniedForever) {
+      throw 'Location permission denied';
+    }
+  }
+
+  Future<void> startSharingLocation() async {
+    final uid = _uid();
+    if (uid == null) throw Exception('Not signed in.');
+    await _ensurePerms();
+
+    // Read current driver doc to cache busCode (if any)
+    try {
+      final snap = await _fs.collection('drivers').doc(uid).get();
+      _busCodeCached = (snap.data()?['busCode'] ?? '').toString().trim().isEmpty
+          ? null
+          : (snap.data()?['busCode'] as String);
+    } catch (_) {
+      _busCodeCached = null;
+    }
+
+    // Mark online immediately (keeps existing busCode if present)
+    await _fs.collection('drivers').doc(uid).set({
+      'status': 'online',
+      'active': true,
+      if (_busCodeCached != null) 'busCode': _busCodeCached,
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+
+    await _posSub?.cancel();
+    _posSub = Geolocator.getPositionStream(
+      locationSettings: const LocationSettings(
+        accuracy: LocationAccuracy.best,
+        distanceFilter: 5, // every 5m
+      ),
+    ).listen((pos) async {
+      // ignore: avoid_print
+      print('📍 Driver GPS = ${pos.latitude}, ${pos.longitude}, heading=${pos.heading}');
+      try {
+        await _fs.collection('drivers').doc(uid).set({
+          // doubles — many clients consume this
+          'lat': pos.latitude,
+          'lng': pos.longitude,
+          // also publish as GeoPoint for schema-agnostic reads
+          'pos': GeoPoint(pos.latitude, pos.longitude),
+          'heading': pos.heading,
+          'status': 'online',
+          'active': true,
+          if (_busCodeCached != null) 'busCode': _busCodeCached,
+          'updatedAt': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
+      } catch (_) {}
+    });
+  }
+
+  Future<void> stopSharingLocation() async {
+    final uid = _uid();
+    await _posSub?.cancel();
+    _posSub = null;
+
+    if (uid == null) return;
+    await _fs.collection('drivers').doc(uid).set({
+      'status': 'offline',
+      'active': false,
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+  }
+
+  Future<void> disposeSharing() async {
+    await _posSub?.cancel();
+    _posSub = null;
+  }
+
+  // ----------------- Leave Requests -----------------
   Future<void> requestLeave({
     required DateTime from,
     required DateTime to,

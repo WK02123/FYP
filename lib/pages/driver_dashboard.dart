@@ -1,21 +1,51 @@
+// lib/pages/driver_dashboard.dart
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+
 import 'driver_scan_page.dart';
 import 'driver_service.dart';
 import 'driver_schedule_page.dart';
 import 'login_page.dart';
+import 'driver_gps_page.dart'; // 👈 GPS page
 
-class DriverDashboard extends StatelessWidget {
+class DriverDashboard extends StatefulWidget {
   const DriverDashboard({super.key});
 
-  void _logout(BuildContext context) async {
-    await FirebaseAuth.instance.signOut();
-    Navigator.pushAndRemoveUntil(
-      context,
-      MaterialPageRoute(builder: (_) => const LoginPage()),
-          (route) => false,
-    );
+  @override
+  State<DriverDashboard> createState() => _DriverDashboardState();
+}
+
+class _DriverDashboardState extends State<DriverDashboard> {
+  final _svc = DriverService.instance;
+  StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _driverSub;
+
+  bool _sharing = false; // mirrors Firestore "status":"online"
+  String _name = 'Driver';
+  String _busCode = '-';
+  String _status = 'offline';
+  String _driverDocId = '';
+
+  @override
+  void initState() {
+    super.initState();
+    _driverSub = _svc.driverStream().listen((snap) {
+      final data = snap.data() ?? {};
+      setState(() {
+        _name = (data['name'] ?? 'Driver').toString();
+        _busCode = (data['busCode'] ?? '-').toString();
+        _status = (data['status'] ?? 'offline').toString();
+        _sharing = _status == 'online';
+        _driverDocId = snap.id;
+      });
+    });
+  }
+
+  @override
+  void dispose() {
+    _driverSub?.cancel();
+    super.dispose();
   }
 
   String _prettyDate(String? ymd) {
@@ -31,9 +61,42 @@ class DriverDashboard extends StatelessWidget {
     }
   }
 
+  Future<void> _toggleSharing(bool on) async {
+    try {
+      if (on) {
+        await _svc.startSharingLocation(); // starts stream + sets status online
+      } else {
+        await _svc.stopSharingLocation();  // cancels stream + sets status offline
+      }
+      setState(() => _sharing = on);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to change status: $e')),
+      );
+    }
+  }
+
+  Future<void> _logout() async {
+    await FirebaseAuth.instance.signOut();
+    if (!mounted) return;
+    Navigator.pushAndRemoveUntil(
+      context,
+      MaterialPageRoute(builder: (_) => const LoginPage()),
+          (route) => false,
+    );
+  }
+
+  void _openGps() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const DriverGpsPage()),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    final svc = DriverService.instance;
+    final svc = _svc;
 
     return Scaffold(
       backgroundColor: Colors.white,
@@ -44,56 +107,71 @@ class DriverDashboard extends StatelessWidget {
         foregroundColor: Colors.white,
         actions: [
           IconButton(
-            icon: const Icon(Icons.logout, color: Colors.white),
-            tooltip: 'Sign out',
-            onPressed: () => _logout(context),
+            icon: const Icon(Icons.qr_code_scanner),
+            tooltip: 'Scan QR',
+            onPressed: () {
+              Navigator.push(context, MaterialPageRoute(builder: (_) => const DriverScanPage()));
+            },
           ),
           IconButton(
-            tooltip: 'Scan QR',
-            icon: const Icon(Icons.qr_code_scanner),
-            onPressed: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(builder: (_) => const DriverScanPage()),
-              );
-            },
+            icon: const Icon(Icons.logout),
+            tooltip: 'Sign out',
+            onPressed: _logout,
           ),
         ],
       ),
+
       body: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
           children: [
-            StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-              stream: svc.driverStream(),
-              builder: (context, snap) {
-                final data = snap.data?.data() ?? {};
-                final name = data['name']?.toString() ?? 'Driver';
-                final status = data['status']?.toString() ?? 'offline';
-                return Card(
-                  shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(16)),
-                  child: ListTile(
-                    leading: const Icon(Icons.person, size: 40, color: Colors.red),
-                    title: Text(name),
-                    subtitle: Text('Bus: ${data['busCode'] ?? '-'}'),
-                    trailing: Text(
-                      status == 'online' ? 'Online' : 'Offline',
+            // Profile + Online/Offline
+            Card(
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+              child: ListTile(
+                leading: const Icon(Icons.person, size: 40, color: Colors.red),
+                title: Text(_name, style: const TextStyle(fontWeight: FontWeight.w600)),
+                subtitle: Text('Bus: $_busCode'),
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      _sharing ? 'Online' : 'Offline',
                       style: TextStyle(
-                        color: status == 'online' ? Colors.green : Colors.grey,
+                        color: _sharing ? Colors.green : Colors.grey,
                         fontWeight: FontWeight.bold,
                       ),
                     ),
-                  ),
-                );
-              },
+                    const SizedBox(width: 8),
+                    Switch.adaptive(
+                      value: _sharing,
+                      activeColor: Colors.green,
+                      onChanged: (v) => _toggleSharing(v),
+                    ),
+                  ],
+                ),
+              ),
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: 10),
+
+            if (_sharing)
+              Row(
+                children: const [
+                  Icon(Icons.location_on, color: Colors.green),
+                  SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      'Live location is being shared with students on your current route.',
+                      style: TextStyle(color: Colors.green),
+                    ),
+                  ),
+                ],
+              ),
+            if (_sharing) const SizedBox(height: 10),
 
             Align(
               alignment: Alignment.centerLeft,
-              child: Text("Report Issue",
-                  style: Theme.of(context).textTheme.titleMedium),
+              child: Text("Report Issue", style: Theme.of(context).textTheme.titleMedium),
             ),
             const SizedBox(height: 8),
             Wrap(
@@ -108,17 +186,13 @@ class DriverDashboard extends StatelessWidget {
             ),
             const SizedBox(height: 20),
 
-            // ✅ Your original schedule card logic (unchanged)
+            // Today's trip card
             Expanded(
               child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
                 stream: svc.todayTrips(),
                 builder: (context, snap) {
-                  if (snap.hasError) {
-                    return const _EmptyCard(text: "Error loading trips");
-                  }
-                  if (!snap.hasData) {
-                    return const Center(child: CircularProgressIndicator());
-                  }
+                  if (snap.hasError) return const _EmptyCard(text: "Error loading trips");
+                  if (!snap.hasData) return const Center(child: CircularProgressIndicator());
 
                   final uid = FirebaseAuth.instance.currentUser!.uid;
                   final all = snap.data!.docs;
@@ -136,10 +210,9 @@ class DriverDashboard extends StatelessWidget {
 
                   return Card(
                     elevation: 2,
-                    shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(16)),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
                     child: ListTile(
-                      title: Text('$dateStr • $timeStr'),
+                      title: Text('$dateStr • $timeStr', style: const TextStyle(fontWeight: FontWeight.w600)),
                       subtitle: Text('$origin → $dest'),
                       trailing: const Icon(Icons.chevron_right, size: 28),
                       onTap: () {
@@ -152,6 +225,43 @@ class DriverDashboard extends StatelessWidget {
                   );
                 },
               ),
+            ),
+          ],
+        ),
+      ),
+
+      // ⬇️ Center GPS FAB + BottomAppBar
+      floatingActionButton: FloatingActionButton(
+        backgroundColor: const Color(0xFFD32F2F),
+        onPressed: _openGps,
+        tooltip: 'View My GPS',
+        child: const Icon(Icons.map, color: Colors.white),
+      ),
+      floatingActionButtonLocation: FloatingActionButtonLocation.centerDocked,
+      bottomNavigationBar: BottomAppBar(
+        shape: const CircularNotchedRectangle(),
+        notchMargin: 8,
+        height: 64,
+        color: Colors.white,
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            // Left: Scan
+            IconButton(
+              tooltip: 'Scan QR',
+              icon: const Icon(Icons.qr_code_scanner),
+              onPressed: () {
+                Navigator.push(context, MaterialPageRoute(builder: (_) => const DriverScanPage()));
+              },
+            ),
+
+            // Right: Schedule
+            IconButton(
+              tooltip: 'Today\'s Schedule',
+              icon: const Icon(Icons.event_note),
+              onPressed: () {
+                Navigator.push(context, MaterialPageRoute(builder: (_) => const DriverSchedulePage()));
+              },
             ),
           ],
         ),
@@ -171,7 +281,6 @@ class _IssueChip extends StatelessWidget {
       avatar: Icon(icon, color: Colors.red),
       label: Text(label),
       onPressed: () async {
-        // Ask for note + optional delay minutes
         final result = await showDialog<_IssueDialogResult>(
           context: context,
           builder: (_) => _IssueDialog(type: label),
@@ -179,13 +288,11 @@ class _IssueChip extends StatelessWidget {
         if (result == null) return;
 
         try {
-          // 1) Log to /issues and 2) call the callable to notify students
           await DriverService.instance.reportIssueAndNotify(
             type: label,
             note: result.note,
             delayMinutes: result.delayMinutes,
           );
-          // UX feedback
           if (context.mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
               SnackBar(content: Text('$label reported. Students notified.')),
@@ -220,7 +327,7 @@ class _IssueDialog extends StatefulWidget {
 
 class _IssueDialogState extends State<_IssueDialog> {
   final _note = TextEditingController();
-  final _delay = TextEditingController(); // minutes (optional)
+  final _delay = TextEditingController();
   bool _sending = false;
 
   @override
@@ -268,9 +375,7 @@ class _IssueDialogState extends State<_IssueDialog> {
           },
           style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
           child: _sending
-              ? const SizedBox(
-              height: 16, width: 16,
-              child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+              ? const SizedBox(height: 16, width: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
               : const Text('Send'),
         )
       ],

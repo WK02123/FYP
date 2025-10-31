@@ -1,4 +1,3 @@
-// lib/pages/route_times_page.dart
 import 'dart:convert';
 import 'dart:io' show Platform; // for Platform.isAndroid
 import 'package:flutter/foundation.dart'; // for kIsWeb
@@ -10,7 +9,6 @@ import 'package:flutter_polyline_points/flutter_polyline_points.dart';
 
 class RouteTimesPage extends StatefulWidget {
   const RouteTimesPage({super.key});
-
   @override
   State<RouteTimesPage> createState() => _RouteTimesPageState();
 }
@@ -19,49 +17,41 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
   final _fs = FirebaseFirestore.instance;
 
   // ========= Keys / Endpoints =========
-  // Your Google key (kept for Places search and (if needed) direct map features)
   static const String _directionsKey = 'AIzaSyBq_qP5gXHGTYVWnlr8MqX6d3uEQnAnCO4';
 
-  // --- AUTO DETECT emulator vs production (no env.dart needed) ---
-  // Toggle this when you deploy
-  static const bool _useEmulator = true; // true = local emulator, false = production
-
-  // Your Firebase project + region
+  // Toggle when you deploy
+  static const bool _useEmulator = true; // true = local emulator, false = prod
   static const String _projectId = 'shuttlebus-e0cef';
   static const String _region = 'asia-southeast1';
 
   String get _cfDirectionsBase {
     if (_useEmulator) {
-      // for Android emulator use 10.0.2.2 to reach host machine; otherwise 127.0.0.1
       final host = kIsWeb ? '127.0.0.1' : (Platform.isAndroid ? '10.0.2.2' : '127.0.0.1');
-      // Functions emulator default: 5001
       return 'http://$host:5001/$_projectId/$_region';
     } else {
       return 'https://$_region-$_projectId.cloudfunctions.net';
     }
   }
 
-  // ========= Route selection (original) =========
+  // ========= Route selection =========
   List<String> _routeKeys = [];
   String? _selectedRouteKey;
   bool _loadingRoutes = true;
 
-  // ========= Current route doc fields (original) =========
+  // ========= Current route fields =========
   List<String> _times = [];
   int _capacity = 15;
   final _capacityCtrl = TextEditingController(text: '15');
   final _busCodeCtrl = TextEditingController();
   final _driverIdCtrl = TextEditingController();
-  // Price (RM shown, store as priceSen)
-  final _priceCtrl = TextEditingController(text: '5.00');
+  final _priceCtrl = TextEditingController(text: '5.00'); // RM shown, store as sen
 
-  // ========= Stops (for mapping origin/destination) =========
+  // ========= Stops / Map =========
   List<_Stop> _stops = [];
   bool _loadingStops = true;
   _Stop? _originStop;
   _Stop? _destStop;
 
-  // ========= Map preview state =========
   GoogleMapController? _map;
   final Set<Marker> _markers = {};
   final Set<Polyline> _polylines = {};
@@ -73,7 +63,7 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
   int? _durationSeconds;
   String? _encodedPolyline;
 
-  // (existing) quick place search helpers
+  // Quick place search
   final _searchCtrl = TextEditingController();
   bool _searchingPlace = false;
   static const LatLng _penangCenter = LatLng(5.3540, 100.3010);
@@ -96,8 +86,7 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
     super.dispose();
   }
 
-  // ====== Load stops for dropdowns ======
-//
+  // ====== Stops list (for optional references) ======
   Future<void> _loadStops() async {
     try {
       final snap = await _fs.collection('stops').get();
@@ -120,14 +109,10 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
   }
 
   _Stop? _findStopById(String id) {
-    try {
-      return _stops.firstWhere((s) => s.id == id);
-    } catch (_) {
-      return null;
-    }
+    try { return _stops.firstWhere((s) => s.id == id); } catch (_) { return null; }
   }
 
-  // ====== Your original: fetch route IDs ======
+  // ====== Fetch route IDs for dropdown ======
   Future<void> _fetchRoutes() async {
     try {
       final snap = await _fs.collection('routes').get();
@@ -139,18 +124,17 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
     }
   }
 
-  // ====== Load a selected route (extended to include map data) ======
+  // ====== Load selected route (also rebuild small map) ======
   Future<void> _loadRoute(String key) async {
     setState(() {
       _selectedRouteKey = key;
-      // reset original fields
       _times = [];
       _capacity = 15;
       _capacityCtrl.text = '15';
       _busCodeCtrl.text = '';
       _driverIdCtrl.text = '';
       _priceCtrl.text = '5.00';
-      // reset map fields
+
       _originStop = null;
       _destStop = null;
       _markers.clear();
@@ -161,100 +145,93 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
     });
 
     final doc = await _fs.collection('routes').doc(key).get();
-    if (doc.exists) {
-      final data = doc.data()!;
+    if (!doc.exists) { setState(() {}); return; }
 
-      // original fields
-      final times = (data['times'] as List?)?.map((e) => e.toString()).toList() ?? [];
-      _times = times..sort((a, b) => _as24(a).compareTo(_as24(b)));
-      _capacity = (data['capacity'] as num?)?.toInt() ?? 15;
-      _capacityCtrl.text = _capacity.toString();
-      _busCodeCtrl.text = (data['busCode'] ?? '').toString();
-      _driverIdCtrl.text = (data['driverId'] ?? '').toString();
-      final priceSen = (data['priceSen'] as num?)?.toInt();
-      if (priceSen != null && priceSen >= 0) {
-        _priceCtrl.text = (priceSen / 100).toStringAsFixed(2);
-      }
+    final data = doc.data()!;
 
-      // map-related saved fields (optional)
-      final originId = (data['originStopId'] ?? '').toString();
-      final destId = (data['destinationStopId'] ?? '').toString();
-      final originGeo = data['origin'] as GeoPoint?;
-      final destGeo = data['destination'] as GeoPoint?;
-      _encodedPolyline = (data['polyline'] ?? '').toString();
-      _distanceMeters = (data['distance_meters'] as num?)?.toInt();
-      _durationSeconds = (data['duration_seconds'] as num?)?.toInt();
+    final times = (data['times'] as List?)?.map((e) => e.toString()).toList() ?? [];
+    _times = times..sort((a, b) => _as24(a).compareTo(_as24(b)));
+    _capacity = (data['capacity'] as num?)?.toInt() ?? 15;
+    _capacityCtrl.text = _capacity.toString();
+    _busCodeCtrl.text = (data['busCode'] ?? '').toString();
+    _driverIdCtrl.text = (data['driverId'] ?? '').toString();
+    final priceSen = (data['priceSen'] as num?)?.toInt();
+    if (priceSen != null && priceSen >= 0) _priceCtrl.text = (priceSen / 100).toStringAsFixed(2);
 
-      _Stop? originCandidate = _findStopById(originId);
-      if (originCandidate == null && originGeo != null) {
-        originCandidate = _Stop(
-          id: 'origin_geo',
-          name: (data['originName'] ?? 'Origin').toString(),
-          code: '',
-          lat: originGeo.latitude,
-          lng: originGeo.longitude,
-        );
-      }
-      _originStop = originCandidate;
+    final originId = (data['originStopId'] ?? '').toString();
+    final destId = (data['destinationStopId'] ?? '').toString();
+    final originGeo = data['origin'] as GeoPoint?;
+    final destGeo = data['destination'] as GeoPoint?;
+    _encodedPolyline = (data['polyline'] ?? '').toString();
+    _distanceMeters = (data['distance_meters'] as num?)?.toInt();
+    _durationSeconds = (data['duration_seconds'] as num?)?.toInt();
 
-      _Stop? destCandidate = _findStopById(destId);
-      if (destCandidate == null && destGeo != null) {
-        destCandidate = _Stop(
-          id: 'dest_geo',
-          name: (data['destinationName'] ?? 'Destination').toString(),
-          code: '',
-          lat: destGeo.latitude,
-          lng: destGeo.longitude,
-        );
-      }
-      _destStop = destCandidate;
-
-      // Rebuild map markers + polyline if stored
-      _markers.clear();
-      if (_originStop != null) {
-        _markers.add(Marker(
-          markerId: const MarkerId('o'),
-          position: LatLng(_originStop!.lat, _originStop!.lng),
-          infoWindow: InfoWindow(title: 'From: ${_originStop!.name}'),
-        ));
-      }
-      if (_destStop != null) {
-        _markers.add(Marker(
-          markerId: const MarkerId('d'),
-          position: LatLng(_destStop!.lat, _destStop!.lng),
-          infoWindow: InfoWindow(title: 'To: ${_destStop!.name}'),
-        ));
-      }
-
-      _polylines.clear();
-      if (_encodedPolyline != null && _encodedPolyline!.isNotEmpty) {
-        final decoded = PolylinePoints().decodePolyline(_encodedPolyline!);
-        _polylines.add(Polyline(
-          polylineId: const PolylineId('route'),
-          width: 6,
-          color: const Color(0xFFD32F2F),
-          points: decoded.map((p) => LatLng(p.latitude, p.longitude)).toList(),
-          startCap: Cap.roundCap,
-          endCap: Cap.roundCap,
-          jointType: JointType.round,
-        ));
-
-        final all = <LatLng>[
-          if (_originStop != null) LatLng(_originStop!.lat, _originStop!.lng),
-          if (_destStop != null) LatLng(_destStop!.lat, _destStop!.lng),
-          ...decoded.map((p) => LatLng(p.latitude, p.longitude)),
-        ];
-        if (all.length >= 2) {
-          _map?.animateCamera(CameraUpdate.newLatLngBounds(_boundsFrom(all), 60));
-        }
-      }
-      setState(() {});
-    } else {
-      setState(() {});
+    _Stop? originCandidate = _findStopById(originId);
+    if (originCandidate == null && originGeo != null) {
+      originCandidate = _Stop(
+        id: 'origin_geo',
+        name: (data['originName'] ?? 'Origin').toString(),
+        code: '',
+        lat: originGeo.latitude,
+        lng: originGeo.longitude,
+      );
     }
+    _originStop = originCandidate;
+
+    _Stop? destCandidate = _findStopById(destId);
+    if (destCandidate == null && destGeo != null) {
+      destCandidate = _Stop(
+        id: 'dest_geo',
+        name: (data['destinationName'] ?? 'Destination').toString(),
+        code: '',
+        lat: destGeo.latitude,
+        lng: destGeo.longitude,
+      );
+    }
+    _destStop = destCandidate;
+
+    _markers.clear();
+    if (_originStop != null) {
+      _markers.add(Marker(
+        markerId: const MarkerId('o'),
+        position: LatLng(_originStop!.lat, _originStop!.lng),
+        infoWindow: InfoWindow(title: 'From: ${_originStop!.name}'),
+      ));
+    }
+    if (_destStop != null) {
+      _markers.add(Marker(
+        markerId: const MarkerId('d'),
+        position: LatLng(_destStop!.lat, _destStop!.lng),
+        infoWindow: InfoWindow(title: 'To: ${_destStop!.name}'),
+      ));
+    }
+
+    _polylines.clear();
+    if (_encodedPolyline != null && _encodedPolyline!.isNotEmpty) {
+      final decoded = PolylinePoints().decodePolyline(_encodedPolyline!);
+      _polylines.add(Polyline(
+        polylineId: const PolylineId('route'),
+        width: 6,
+        color: const Color(0xFFD32F2F),
+        points: decoded.map((p) => LatLng(p.latitude, p.longitude)).toList(),
+        startCap: Cap.roundCap,
+        endCap: Cap.roundCap,
+        jointType: JointType.round,
+      ));
+
+      final all = <LatLng>[
+        if (_originStop != null) LatLng(_originStop!.lat, _originStop!.lng),
+        if (_destStop != null) LatLng(_destStop!.lat, _destStop!.lng),
+        ...decoded.map((p) => LatLng(p.latitude, p.longitude)),
+      ];
+      if (all.length >= 2) {
+        _map?.animateCamera(CameraUpdate.newLatLngBounds(_boundsFrom(all), 60));
+      }
+    }
+    setState(() {});
   }
 
-  // ====== Create new route (your original) ======
+  // ====== Create new route (manual key) ======
   Future<void> _createRouteDialog() async {
     final o = TextEditingController();
     final d = TextEditingController();
@@ -277,11 +254,7 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
             TextField(
               controller: p,
               keyboardType: const TextInputType.numberWithOptions(decimal: true),
-              decoration: const InputDecoration(
-                labelText: 'Price (RM)',
-                hintText: 'e.g. 5.00',
-                border: OutlineInputBorder(),
-              ),
+              decoration: const InputDecoration(labelText: 'Price (RM)', hintText: 'e.g. 5.00', border: OutlineInputBorder()),
             ),
           ],
         ),
@@ -313,26 +286,22 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
 
     await _fetchRoutes();
     await _loadRoute(key);
-
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Route "$key" created')));
   }
 
-  // ====== Times (your original) ======
+  // ====== Times ======
   Future<void> _addTime() async {
     if (_selectedRouteKey == null) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Pick a route first')));
+      _snack('Pick a route first');
       return;
     }
-    final picked = await showTimePicker(
-      context: context,
-      initialTime: const TimeOfDay(hour: 7, minute: 0),
-    );
+    final picked = await showTimePicker(context: context, initialTime: const TimeOfDay(hour: 7, minute: 0));
     if (picked == null) return;
 
     final t12 = _format12(picked);
     if (_times.contains(t12)) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Time already exists')));
+      _snack('Time already exists');
       return;
     }
 
@@ -354,12 +323,8 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
 
   Future<void> _saveMeta() async {
     if (_selectedRouteKey == null) return;
-
     final cap = int.tryParse(_capacityCtrl.text.trim());
-    if (cap == null || cap <= 0) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Capacity must be > 0')));
-      return;
-    }
+    if (cap == null || cap <= 0) { _snack('Capacity must be > 0'); return; }
     final priceSen = _parsePriceToSen(_priceCtrl.text);
 
     await _fs.collection('routes').doc(_selectedRouteKey).set({
@@ -371,19 +336,13 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
     }, SetOptions(merge: true));
 
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Saved')));
+    _snack('Saved');
   }
 
-  // ====== Build Directions preview (calls your Cloud Function) ======
+  // ====== Build preview via Cloud Function ======
   Future<void> _buildPreview() async {
-    if (_selectedRouteKey == null) {
-      _snack('Pick a route first');
-      return;
-    }
-    if (_originStop == null || _destStop == null) {
-      _snack('Select origin and destination');
-      return;
-    }
+    if (_selectedRouteKey == null) { _snack('Pick a route first'); return; }
+    if (_originStop == null || _destStop == null) { _snack('Select origin and destination'); return; }
     setState(() => _fetchingRoute = true);
 
     try {
@@ -395,29 +354,17 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
       );
 
       final res = await http.get(url);
-      if (res.statusCode != 200) {
-        _snack('Directions error: HTTP ${res.statusCode}');
-        return;
-      }
+      if (res.statusCode != 200) { _snack('Directions error: HTTP ${res.statusCode}'); return; }
 
       final data = json.decode(res.body);
-      if ((data['status'] ?? '') != 'OK') {
-        _snack('Directions failed: ${data['status'] ?? 'UNKNOWN'}');
-        return;
-      }
+      if ((data['status'] ?? '') != 'OK') { _snack('Directions failed: ${data['status'] ?? 'UNKNOWN'}'); return; }
 
       final routes = (data['routes'] as List?) ?? [];
-      if (routes.isEmpty) {
-        _snack('No route found between the two points.');
-        return;
-      }
+      if (routes.isEmpty) { _snack('No route found between the two points.'); return; }
 
       final r0 = routes[0];
       _encodedPolyline = (r0['overview_polyline']?['points'] ?? '').toString();
-      if (_encodedPolyline == null || _encodedPolyline!.isEmpty) {
-        _snack('Directions returned empty polyline.');
-        return;
-      }
+      if (_encodedPolyline == null || _encodedPolyline!.isEmpty) { _snack('Directions returned empty polyline.'); return; }
       final decoded = PolylinePoints().decodePolyline(_encodedPolyline!);
 
       final legs = (r0['legs'] as List?) ?? [];
@@ -468,45 +415,78 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
     }
   }
 
-  // ====== Save the map route ======
+  // ====== Save map route (with REPLACE old doc if key changes) ======
   Future<void> _saveMapRoute() async {
-    if (_selectedRouteKey == null) {
-      _snack('Pick a route first');
-      return;
-    }
+    if (_selectedRouteKey == null) { _snack('Pick a route first'); return; }
     if (_originStop == null || _destStop == null || _encodedPolyline == null || _encodedPolyline!.isEmpty) {
       _snack('Build the preview first');
       return;
     }
 
-    await _fs.collection('routes').doc(_selectedRouteKey).set({
+    // Map payload we want to save
+    final mapFields = {
       'originStopId': _originStop!.id,
-      'originName': _originStop!.name,
-      'origin': GeoPoint(_originStop!.lat, _originStop!.lng),
+      'originName'  : _originStop!.name,
+      'origin'      : GeoPoint(_originStop!.lat, _originStop!.lng),
       'destinationStopId': _destStop!.id,
-      'destinationName': _destStop!.name,
-      'destination': GeoPoint(_destStop!.lat, _destStop!.lng),
-      'polyline': _encodedPolyline,
-      'distance_meters': _distanceMeters,
-      'duration_seconds': _durationSeconds,
-      'updatedAt': FieldValue.serverTimestamp(),
-    }, SetOptions(merge: true));
+      'destinationName'  : _destStop!.name,
+      'destination'      : GeoPoint(_destStop!.lat, _destStop!.lng),
+      'polyline'         : _encodedPolyline,
+      'distance_meters'  : _distanceMeters,
+      'duration_seconds' : _durationSeconds,
+      'updatedAt'        : FieldValue.serverTimestamp(),
+    };
 
-    _snack('Map route saved');
+    // Compute new key from names (trim + single-space)
+    final newKey = _makeKeyFromNames(_originStop!.name, _destStop!.name);
+    final oldKey = _selectedRouteKey!;
+
+    if (newKey == oldKey) {
+      // Simple update in-place
+      await _fs.collection('routes').doc(oldKey).set(mapFields, SetOptions(merge: true));
+      _snack('Map route saved');
+      await _loadRoute(oldKey);
+      return;
+    }
+
+    // Key changed: copy meta to new doc, delete old doc, update selection
+    final oldDoc = await _fs.collection('routes').doc(oldKey).get();
+    final old = oldDoc.data() ?? {};
+
+    // preserve meta
+    final newDocData = {
+      // meta
+      'capacity' : _capacity,
+      'busCode'  : _busCodeCtrl.text.trim(),
+      'driverId' : _driverIdCtrl.text.trim(),
+      'priceSen' : _parsePriceToSen(_priceCtrl.text),
+      'times'    : _times,
+      'active'   : (old['active'] ?? true),
+      // map
+      ...mapFields,
+    };
+
+    final batch = _fs.batch();
+    final newRef = _fs.collection('routes').doc(newKey);
+    final oldRef = _fs.collection('routes').doc(oldKey);
+
+    batch.set(newRef, newDocData);
+    batch.delete(oldRef);
+    await batch.commit();
+
+    _snack('Route updated & replaced: $oldKey → $newKey');
+
+    // refresh dropdown list & select new route
+    await _fetchRoutes();
+    await _loadRoute(newKey);
   }
 
-  // ====== Create a stop in Firestore ======
+  // ====== Create and save stops when picking on the full-screen map ======
   Future<_Stop> _createStopInFirestore({
-    required String name,
-    required String code,
-    required double lat,
-    required double lng,
+    required String name, required String code, required double lat, required double lng,
   }) async {
     final ref = await _fs.collection('stops').add({
-      'name': name,
-      'code': code,
-      'lat': lat,
-      'lng': lng,
+      'name': name, 'code': code, 'lat': lat, 'lng': lng,
       'createdAt': FieldValue.serverTimestamp(),
       'updatedAt': FieldValue.serverTimestamp(),
     });
@@ -515,7 +495,7 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
     return s;
   }
 
-  // ====== Place search (kept) ======
+  // ====== Place search ======
   Future<void> _searchPlace(String query) async {
     if (query.trim().isEmpty) return _snack('Enter a location name');
     setState(() => _searchingPlace = true);
@@ -533,10 +513,7 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
       final res = await http.get(url);
       final data = json.decode(res.body);
       final results = (data['results'] as List?) ?? [];
-      if (res.statusCode != 200 || results.isEmpty) {
-        _snack('No place found');
-        return;
-      }
+      if (res.statusCode != 200 || results.isEmpty) { _snack('No place found'); return; }
 
       final first = results.first;
       final geo = first['geometry']?['location'] ?? {};
@@ -559,6 +536,11 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
   }
 
   // ====== Helpers ======
+  String _makeKeyFromNames(String oName, String dName) {
+    String norm(String s) => s.replaceAll(RegExp(r'\s+'), ' ').trim();
+    return '${norm(oName)}|${norm(dName)}';
+  }
+
   int _parsePriceToSen(String input) {
     final cleaned = input.replaceAll(RegExp(r'[^0-9\.,]'), '').replaceAll(',', '.');
     final v = double.tryParse(cleaned) ?? 0.0;
@@ -639,11 +621,7 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
             },
             icon: const Icon(Icons.search),
           ),
-          IconButton(
-            tooltip: 'New Route',
-            onPressed: _createRouteDialog,
-            icon: const Icon(Icons.add_road),
-          ),
+          IconButton(tooltip: 'New Route', onPressed: _createRouteDialog, icon: const Icon(Icons.add_road)),
         ],
       ),
       body: Padding(
@@ -693,11 +671,8 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
                               children: [
                                 ElevatedButton.icon(
                                   onPressed: () async {
-                                    if (_selectedRouteKey == null) {
-                                      _snack('Pick a route first');
-                                      return;
-                                    }
-                                    // Open full-screen picker
+                                    if (_selectedRouteKey == null) { _snack('Pick a route first'); return; }
+                                    // Full-screen picker
                                     final result = await Navigator.of(context).push<_PickerResult>(
                                       MaterialPageRoute(
                                         builder: (_) => _MapPickerPage(
@@ -713,7 +688,7 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
                                     );
                                     if (result == null) return;
 
-                                    // Save/Update stops, attach, then draw route + save
+                                    // Create/attach stops
                                     final o = await _createStopInFirestore(
                                       name: result.originName,
                                       code: result.originCode,
@@ -732,21 +707,19 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
                                       _destStop = d;
                                     });
 
-                                    await _buildPreview(); // draws + sets polyline/distance/duration
+                                    await _buildPreview();          // draw + compute stats
                                     if (_encodedPolyline == null || _encodedPolyline!.isEmpty) {
                                       _snack('No route returned. Try moving pins closer to roads or check API key.');
                                       return;
                                     }
-                                    await _saveMapRoute();
+                                    await _saveMapRoute();          // <-- may REPLACE doc if key changed
                                   },
                                   icon: const Icon(Icons.map),
                                   label: const Text('Open Map Picker'),
                                 ),
                                 const SizedBox(width: 10),
                                 if (_distanceMeters != null && _durationSeconds != null)
-                                  Text(
-                                    '${(_distanceMeters! / 1000).toStringAsFixed(1)} km  •  ${(_durationSeconds! / 60).round()} mins',
-                                  ),
+                                  Text('${(_distanceMeters! / 1000).toStringAsFixed(1)} km  •  ${(_durationSeconds! / 60).round()} mins'),
                               ],
                             ),
                             const SizedBox(height: 10),
@@ -761,7 +734,6 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
                                   polylines: _polylines,
                                   myLocationButtonEnabled: false,
                                   zoomControlsEnabled: false,
-                                  // Tap small map to open picker too
                                   onTap: (_) async {
                                     final result = await Navigator.of(context).push<_PickerResult>(
                                       MaterialPageRoute(
@@ -801,7 +773,7 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
                                       _snack('No route returned. Try moving pins closer to roads or check API key.');
                                       return;
                                     }
-                                    await _saveMapRoute();
+                                    await _saveMapRoute(); // <-- replace if needed
                                   },
                                 ),
                               ),
@@ -888,11 +860,7 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
                       children: [
                         const Text('Times', style: TextStyle(fontWeight: FontWeight.bold)),
                         const Spacer(),
-                        TextButton.icon(
-                          onPressed: _addTime,
-                          icon: const Icon(Icons.add),
-                          label: const Text('Add Time'),
-                        ),
+                        TextButton.icon(onPressed: _addTime, icon: const Icon(Icons.add), label: const Text('Add Time')),
                       ],
                     ),
 
@@ -906,11 +874,7 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
                         spacing: 8,
                         runSpacing: 8,
                         children: _times.map((t) {
-                          return Chip(
-                            label: Text(t),
-                            deleteIcon: const Icon(Icons.close),
-                            onDeleted: () => _removeTime(t),
-                          );
+                          return Chip(label: Text(t), deleteIcon: const Icon(Icons.close), onDeleted: () => _removeTime(t));
                         }).toList(),
                       ),
                   ],
@@ -928,10 +892,7 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
 class _MapPickerPage extends StatefulWidget {
   final String apiKey;
   final LatLng initialCenter;
-  const _MapPickerPage({
-    required this.apiKey,
-    required this.initialCenter,
-  });
+  const _MapPickerPage({required this.apiKey, required this.initialCenter});
 
   @override
   State<_MapPickerPage> createState() => _MapPickerPageState();
@@ -1126,14 +1087,7 @@ class _Stop {
   final double lat;
   final double lng;
 
-  _Stop({
-    required this.id,
-    required this.name,
-    required this.code,
-    required this.lat,
-    required this.lng,
-  });
-
+  _Stop({required this.id, required this.name, required this.code, required this.lat, required this.lng});
   @override
   String toString() => '$name ($code)';
 }
