@@ -46,6 +46,11 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
   final _driverIdCtrl = TextEditingController();
   final _priceCtrl = TextEditingController(text: '5.00'); // RM shown, store as sen
 
+  // ========= Cancel/Restore status =========
+  bool _isActive = true;
+  final _cancelReasonCtrl = TextEditingController();
+  bool _savingActive = false;
+
   // ========= Stops / Map =========
   List<_Stop> _stops = [];
   bool _loadingStops = true;
@@ -82,6 +87,7 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
     _driverIdCtrl.dispose();
     _priceCtrl.dispose();
     _searchCtrl.dispose();
+    _cancelReasonCtrl.dispose();
     _map?.dispose();
     super.dispose();
   }
@@ -142,11 +148,13 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
       _distanceMeters = null;
       _durationSeconds = null;
       _encodedPolyline = null;
+
+      _isActive = true;
+      _cancelReasonCtrl.text = '';
     });
 
     final doc = await _fs.collection('routes').doc(key).get();
     if (!doc.exists) { setState(() {}); return; }
-
     final data = doc.data()!;
 
     final times = (data['times'] as List?)?.map((e) => e.toString()).toList() ?? [];
@@ -158,10 +166,14 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
     final priceSen = (data['priceSen'] as num?)?.toInt();
     if (priceSen != null && priceSen >= 0) _priceCtrl.text = (priceSen / 100).toStringAsFixed(2);
 
+    // status
+    _isActive = (data['active'] as bool?) ?? true;
+    _cancelReasonCtrl.text = (data['cancelReason'] ?? '').toString();
+
     final originId = (data['originStopId'] ?? '').toString();
-    final destId = (data['destinationStopId'] ?? '').toString();
+    final destId   = (data['destinationStopId'] ?? '').toString();
     final originGeo = data['origin'] as GeoPoint?;
-    final destGeo = data['destination'] as GeoPoint?;
+    final destGeo   = data['destination'] as GeoPoint?;
     _encodedPolyline = (data['polyline'] ?? '').toString();
     _distanceMeters = (data['distance_meters'] as num?)?.toInt();
     _durationSeconds = (data['duration_seconds'] as num?)?.toInt();
@@ -339,6 +351,80 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
     _snack('Saved');
   }
 
+  // ====== Cancel / Restore ======
+  Future<void> _cancelRoute() async {
+    if (_selectedRouteKey == null || _savingActive) return;
+
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Cancel this route?'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('Students will not be able to book this route while it is cancelled.'),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _cancelReasonCtrl,
+              maxLines: 3,
+              decoration: const InputDecoration(
+                labelText: 'Reason (optional)',
+                hintText: 'e.g. Bus maintenance, road closure…',
+                border: OutlineInputBorder(),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('No')),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFFD32F2F)),
+            child: const Text('Yes, cancel'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+
+    setState(() => _savingActive = true);
+    try {
+      await _fs.collection('routes').doc(_selectedRouteKey).set({
+        'active': false,
+        'cancelReason': _cancelReasonCtrl.text.trim(),
+        'cancelledAt': FieldValue.serverTimestamp(),
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+      setState(() => _isActive = false);
+      _snack('Route cancelled');
+    } catch (e) {
+      _snack('Failed to cancel: $e');
+    } finally {
+      setState(() => _savingActive = false);
+    }
+  }
+
+  Future<void> _restoreRoute() async {
+    if (_selectedRouteKey == null || _savingActive) return;
+
+    setState(() => _savingActive = true);
+    try {
+      await _fs.collection('routes').doc(_selectedRouteKey).set({
+        'active': true,
+        'cancelReason': FieldValue.delete(),
+        'cancelledAt': FieldValue.delete(),
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+      setState(() => _isActive = true);
+      _snack('Route restored');
+    } catch (e) {
+      _snack('Failed to restore: $e');
+    } finally {
+      setState(() => _savingActive = false);
+    }
+  }
+
   // ====== Build preview via Cloud Function ======
   Future<void> _buildPreview() async {
     if (_selectedRouteKey == null) { _snack('Pick a route first'); return; }
@@ -453,7 +539,6 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
     final oldDoc = await _fs.collection('routes').doc(oldKey).get();
     final old = oldDoc.data() ?? {};
 
-    // preserve meta
     final newDocData = {
       // meta
       'capacity' : _capacity,
@@ -476,7 +561,6 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
 
     _snack('Route updated & replaced: $oldKey → $newKey');
 
-    // refresh dropdown list & select new route
     await _fetchRoutes();
     await _loadRoute(newKey);
   }
@@ -648,7 +732,23 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
                 ),
               ],
             ),
-            const SizedBox(height: 14),
+            const SizedBox(height: 8),
+
+            if (_selectedRouteKey != null && !_isActive)
+              Container(
+                width: double.infinity,
+                margin: const EdgeInsets.only(bottom: 12, top: 4),
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFFFF8E1),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: const Color(0xFFFFE082)),
+                ),
+                child: Text(
+                  'This route is currently CANCELLED. Students cannot book it.',
+                  style: TextStyle(color: Colors.orange.shade800, fontWeight: FontWeight.w600),
+                ),
+              ),
 
             if (_selectedRouteKey == null)
               const Expanded(child: Center(child: Text('Pick a route or create a new one')))
@@ -672,7 +772,6 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
                                 ElevatedButton.icon(
                                   onPressed: () async {
                                     if (_selectedRouteKey == null) { _snack('Pick a route first'); return; }
-                                    // Full-screen picker
                                     final result = await Navigator.of(context).push<_PickerResult>(
                                       MaterialPageRoute(
                                         builder: (_) => _MapPickerPage(
@@ -688,7 +787,6 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
                                     );
                                     if (result == null) return;
 
-                                    // Create/attach stops
                                     final o = await _createStopInFirestore(
                                       name: result.originName,
                                       code: result.originCode,
@@ -707,12 +805,12 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
                                       _destStop = d;
                                     });
 
-                                    await _buildPreview();          // draw + compute stats
+                                    await _buildPreview();
                                     if (_encodedPolyline == null || _encodedPolyline!.isEmpty) {
                                       _snack('No route returned. Try moving pins closer to roads or check API key.');
                                       return;
                                     }
-                                    await _saveMapRoute();          // <-- may REPLACE doc if key changed
+                                    await _saveMapRoute();
                                   },
                                   icon: const Icon(Icons.map),
                                   label: const Text('Open Map Picker'),
@@ -773,11 +871,85 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
                                       _snack('No route returned. Try moving pins closer to roads or check API key.');
                                       return;
                                     }
-                                    await _saveMapRoute(); // <-- replace if needed
+                                    await _saveMapRoute();
                                   },
                                 ),
                               ),
                             ),
+                          ],
+                        ),
+                      ),
+                    ),
+
+                    // ==== Status / Cancel card ====
+                    Card(
+                      elevation: 1,
+                      margin: const EdgeInsets.only(bottom: 16),
+                      child: Padding(
+                        padding: const EdgeInsets.all(12),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text('Status', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                            const SizedBox(height: 8),
+                            Row(
+                              children: [
+                                Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                                  decoration: BoxDecoration(
+                                    color: _isActive ? const Color(0xFFE8F5E9) : const Color(0xFFFFEBEE),
+                                    borderRadius: BorderRadius.circular(20),
+                                    border: Border.all(color: _isActive ? const Color(0xFF81C784) : const Color(0xFFE57373)),
+                                  ),
+                                  child: Text(
+                                    _isActive ? 'ACTIVE' : 'CANCELLED',
+                                    style: TextStyle(
+                                      fontWeight: FontWeight.w700,
+                                      color: _isActive ? const Color(0xFF2E7D32) : const Color(0xFFC62828),
+                                      letterSpacing: 0.3,
+                                    ),
+                                  ),
+                                ),
+                                const Spacer(),
+                                if (_savingActive)
+                                  const Padding(
+                                    padding: EdgeInsets.only(right: 8),
+                                    child: SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)),
+                                  ),
+                                if (_isActive)
+                                  OutlinedButton.icon(
+                                    onPressed: _savingActive ? null : _cancelRoute,
+                                    icon: const Icon(Icons.block),
+                                    style: OutlinedButton.styleFrom(
+                                      foregroundColor: const Color(0xFFC62828),
+                                      side: const BorderSide(color: Color(0xFFC62828)),
+                                    ),
+                                    label: const Text('Cancel route'),
+                                  )
+                                else
+                                  OutlinedButton.icon(
+                                    onPressed: _savingActive ? null : _restoreRoute,
+                                    icon: const Icon(Icons.restore),
+                                    style: OutlinedButton.styleFrom(
+                                      foregroundColor: const Color(0xFF2E7D32),
+                                      side: const BorderSide(color: Color(0xFF2E7D32)),
+                                    ),
+                                    label: const Text('Restore route'),
+                                  ),
+                              ],
+                            ),
+                            if (!_isActive) ...[
+                              const SizedBox(height: 10),
+                              TextField(
+                                controller: _cancelReasonCtrl,
+                                maxLines: 2,
+                                readOnly: true,
+                                decoration: const InputDecoration(
+                                  labelText: 'Cancel reason',
+                                  border: OutlineInputBorder(),
+                                ),
+                              ),
+                            ],
                           ],
                         ),
                       ),

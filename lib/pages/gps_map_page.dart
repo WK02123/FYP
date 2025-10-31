@@ -2,16 +2,18 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
+import 'dart:ui' as ui;                       // 👈 for bitmap scaling
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show rootBundle; // 👈 for asset bytes
 import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:http/http.dart' as http;
 import 'package:flutter_polyline_points/flutter_polyline_points.dart';
 
-/// -------- Auth helper (ensures we can read under your rules) --------
+/// --- Ensure we can read Firestore under your rules ---
 Future<void> _ensureSignedIn() async {
   final auth = FirebaseAuth.instance;
   if (auth.currentUser == null) {
@@ -21,7 +23,6 @@ Future<void> _ensureSignedIn() async {
 
 class GpsMapPage extends StatefulWidget {
   const GpsMapPage({super.key});
-
   @override
   State<GpsMapPage> createState() => _GpsMapPageState();
 }
@@ -34,23 +35,32 @@ class _GpsMapPageState extends State<GpsMapPage> {
 
   final Set<Marker> _markers = {};
   final Set<Polyline> _polylines = {};
+  final Set<Circle> _circles = {};                 // soft halo for buses
 
-  StreamSubscription<QuerySnapshot>? _routesSub;
-  StreamSubscription<QuerySnapshot>? _driversSub;
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _routesSub;
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _driversSub;
 
-  // Only used when a route doc has no saved polyline
+  // Fallback Directions key if route has no saved polyline
   static const String _directionsKey = 'YOUR_GOOGLE_KEY_HERE';
 
   String? _summary; // distance • duration
 
-  // Marker icons
+  // Icons
   BitmapDescriptor? _pickupIcon;
   BitmapDescriptor? _dropIcon;
-  BitmapDescriptor? _carIcon;
+  BitmapDescriptor? _carIcon;                     // 👈 fixed-size car
+
+  // Config: car marker width (px)
+  static const int carWidthPx = 64;               // try 48 / 64 / 72
 
   // Route cache + current active route key
   final Map<String, _RouteDoc> _routeIndex = {};
   String? _activeRouteKey;
+
+  // --- driver auto-center helpers ---
+  bool _autoCenteredOnce = false;
+  List<Marker> _driverMarkers() =>
+      _markers.where((m) => m.markerId.value.startsWith('drv_')).toList();
 
   @override
   void initState() {
@@ -59,11 +69,11 @@ class _GpsMapPageState extends State<GpsMapPage> {
   }
 
   Future<void> _boot() async {
-    await _ensureSignedIn();               // 👈 important for your Firestore rules
+    await _ensureSignedIn();
     await _loadMarkerIcons();
     await _initLocation();
     _subscribeRoutes();
-    _subscribeAllOnlineDrivers();          // 👈 shows live buses
+    _subscribeAllOnlineDrivers();
   }
 
   @override
@@ -72,6 +82,21 @@ class _GpsMapPageState extends State<GpsMapPage> {
     _driversSub?.cancel();
     _controller?.dispose();
     super.dispose();
+  }
+
+  /* ---------------- Icons ---------------- */
+
+  Future<BitmapDescriptor> _bitmapFromAsset(String path, {int width = 64}) async {
+    final data = await rootBundle.load(path);
+    final codec = await ui.instantiateImageCodec(
+      data.buffer.asUint8List(),
+      targetWidth: width, // 👈 force fixed size
+    );
+    final frame = await codec.getNextFrame();
+    final bytes = (await frame.image.toByteData(format: ui.ImageByteFormat.png))!
+        .buffer
+        .asUint8List();
+    return BitmapDescriptor.fromBytes(bytes);
   }
 
   Future<void> _loadMarkerIcons() async {
@@ -84,19 +109,18 @@ class _GpsMapPageState extends State<GpsMapPage> {
         const ImageConfiguration(size: Size(48, 48)),
         'assets/map/pin_drop.png',
       );
-      _carIcon = await BitmapDescriptor.fromAssetImage(
-        const ImageConfiguration(size: Size(96, 96)),
-        'assets/map/car.png',
-      );
+      // 👇 your bus icon, scaled to a fixed width
+      _carIcon = await _bitmapFromAsset('assets/map/car.png', width: carWidthPx);
     } catch (_) {
       _pickupIcon = BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueGreen);
       _dropIcon   = BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRose);
-      _carIcon    = BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueAzure);
+      _carIcon    = BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRed);
     }
     if (mounted) setState(() {});
   }
 
-  // ---- User location ----
+  /* ---------------- My location ---------------- */
+
   Future<void> _initLocation() async {
     final serviceEnabled = await Geolocator.isLocationServiceEnabled();
     if (!serviceEnabled) { _snack('Please enable GPS/location services'); return; }
@@ -106,8 +130,7 @@ class _GpsMapPageState extends State<GpsMapPage> {
       permission = await Geolocator.requestPermission();
     }
     if (permission == LocationPermission.denied || permission == LocationPermission.deniedForever) {
-      _snack('Location permission denied. Enable it in settings.');
-      return;
+      _snack('Location permission denied. Enable it in settings.'); return;
     }
 
     try {
@@ -121,20 +144,22 @@ class _GpsMapPageState extends State<GpsMapPage> {
     }
   }
 
-  // ================== ROUTES SNAPSHOT ==================
+  /* ---------------- Routes snapshot ---------------- */
+
   void _subscribeRoutes() {
     _routesSub = _fs.collection('routes').snapshots().listen((snap) async {
       // Keep non-route markers (drivers & active pins)
       final keep = _markers.where((m) =>
       !m.markerId.value.startsWith('route_o_') &&
-          !m.markerId.value.startsWith('route_d_')).toList();
+          !m.markerId.value.startsWith('route_d_')
+      ).toList();
 
       final routeMarkers = <Marker>{};
       _routeIndex.clear();
 
       for (final d in snap.docs) {
-        final data = d.data() as Map<String, dynamic>;
-        final key = d.id;
+        final data = d.data();
+        final key  = d.id;
 
         final originGp = data['origin'] as GeoPoint?;
         final destGp   = data['destination'] as GeoPoint?;
@@ -185,12 +210,11 @@ class _GpsMapPageState extends State<GpsMapPage> {
       if (_activeRouteKey != null && _routeIndex[_activeRouteKey!] != null) {
         _applyActiveRoute(_routeIndex[_activeRouteKey!]!, keepViewport: true);
       }
-    }, onError: (e) {
-      _snack('Routes stream error: $e');
-    });
+    }, onError: (e) => _snack('Routes stream error: $e'));
   }
 
-  // ================== LIVE DRIVERS (supports active:true or status:"online", lat/lng or pos) ==================
+  /* ---------------- Drivers (active:true or status:"online") ---------------- */
+
   void _subscribeAllOnlineDrivers() {
     _driversSub = _fs
         .collection('drivers')
@@ -198,9 +222,11 @@ class _GpsMapPageState extends State<GpsMapPage> {
         .snapshots()
         .listen((snap) async {
       if (snap.docs.isEmpty) {
-        // Fallback to the other schema once
         try {
-          final alt = await _fs.collection('drivers').where('status', isEqualTo: 'online').get();
+          final alt = await _fs
+              .collection('drivers')
+              .where('status', isEqualTo: 'online')
+              .get();
           _applyDriverDocs(alt.docs);
         } catch (e) {
           _snack('Drivers (fallback) error: $e');
@@ -208,16 +234,19 @@ class _GpsMapPageState extends State<GpsMapPage> {
       } else {
         _applyDriverDocs(snap.docs);
       }
-    }, onError: (e) {
-      _snack('Drivers stream error: $e'); // will show permission errors here
-    });
+    }, onError: (e) => _snack('Drivers stream error: $e'));
   }
 
   void _applyDriverDocs(List<QueryDocumentSnapshot<Map<String, dynamic>>> docs) async {
+    // Remove existing driver markers + halos
     _markers.removeWhere((m) => m.markerId.value.startsWith('drv_'));
+    _circles.removeWhere((c) => c.circleId.value.startsWith('drv_'));
+
+    int shown = 0, missing = 0; int idx = 0;
 
     for (final doc in docs) {
       final d = doc.data();
+
       // Accept doubles or GeoPoint
       double? lat = (d['lat'] as num?)?.toDouble();
       double? lng = (d['lng'] as num?)?.toDouble();
@@ -226,23 +255,51 @@ class _GpsMapPageState extends State<GpsMapPage> {
         lat = posGp.latitude;
         lng = posGp.longitude;
       }
-      if (lat == null || lng == null) continue;
+      if (lat == null || lng == null) { missing++; continue; }
 
-      final busCode = (d['busCode'] ?? 'Bus').toString();
-      final routeLabel = await _resolveDriverRouteLabel(doc.id, d);
+      shown++;
+      final pos = LatLng(lat, lng);
+      final busCode  = (d['busCode'] ?? 'Bus').toString();
+      final heading  = (d['heading'] as num?)?.toDouble() ?? 0.0;
+      final routeLbl = await _resolveDriverRouteLabel(doc.id, d);
 
+      // 👉 fixed-size custom car marker, rotated by heading if available
       _markers.add(
         Marker(
           markerId: MarkerId('drv_${doc.id}'),
-          position: LatLng(lat, lng),
+          position: pos,
+          icon: _carIcon ?? BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRed),
+          rotation: heading,     // 0..360
           flat: true,
           anchor: const Offset(0.5, 0.5),
-          icon: _carIcon ?? BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueAzure),
-          infoWindow: InfoWindow(title: '🚌 $busCode', snippet: routeLabel),
+          zIndex: 10000.0 + idx,
+          infoWindow: InfoWindow(title: '🚌 $busCode', snippet: routeLbl),
         ),
       );
+
+      // Soft halo to make it pop
+      _circles.add(
+        Circle(
+          circleId: CircleId('drv_${doc.id}_halo'),
+          center: pos,
+          radius: 25.0,
+          strokeWidth: 2,
+          strokeColor: const Color(0xFFE53935),
+          fillColor: const Color(0x33E53935),
+          zIndex: 9999,
+        ),
+      );
+
+      idx++;
     }
+
+    // Debug
+    // ignore: avoid_print
+    print('🗺️ Drivers snapshot: total=${docs.length}, shown=$shown, missingCoords=$missing');
+
     if (mounted) setState(() {});
+
+    if (shown > 0) _fitToDrivers();
   }
 
   Future<String> _resolveDriverRouteLabel(String driverId, Map<String, dynamic> driver) async {
@@ -262,20 +319,43 @@ class _GpsMapPageState extends State<GpsMapPage> {
       Map<String, dynamic>? chosen;
       DateTime? chosenTime;
       for (final d in qs.docs) {
-        final m = d.data() as Map<String, dynamic>;
+        final m = d.data();
         final t = _todayAt((m['time'] ?? '').toString());
         if (t == null) continue;
         if (!t.isBefore(now) && (chosenTime == null || t.isBefore(chosenTime!))) {
           chosen = m; chosenTime = t;
         }
       }
-      chosen ??= qs.docs.first.data() as Map<String, dynamic>;
+      chosen ??= qs.docs.first.data();
       final origin = (chosen?['origin'] ?? 'Origin').toString();
       final dest   = (chosen?['destination'] ?? 'Destination').toString();
       return '$origin → $dest';
     } catch (_) {
       return 'On duty';
     }
+  }
+
+  void _fitToDrivers({bool force = false}) {
+    if (_controller == null) return;
+    final drivers = _driverMarkers();
+    if (drivers.isEmpty) return;
+
+    if (!force && _autoCenteredOnce) return;
+
+    if (drivers.length == 1) {
+      final id = drivers.first.markerId;
+      _controller!.animateCamera(
+        CameraUpdate.newCameraPosition(
+          CameraPosition(target: drivers.first.position, zoom: 17),
+        ),
+      );
+      _controller!.showMarkerInfoWindow(id);
+    } else {
+      final pts = drivers.map((m) => m.position).toList();
+      final b = _boundsFrom(pts);
+      _controller!.animateCamera(CameraUpdate.newLatLngBounds(b, 60));
+    }
+    _autoCenteredOnce = true;
   }
 
   String _todayYmd() {
@@ -290,14 +370,16 @@ class _GpsMapPageState extends State<GpsMapPage> {
     final n = DateTime.now(); return DateTime(n.year, n.month, n.day, h, m);
   }
 
-  // ================== OPEN / APPLY ACTIVE ROUTE ==================
+  /* ---------------- Open / apply active route ---------------- */
+
   Future<void> _showRoute(_RouteDoc r) async {
     _summary = null;
     _activeRouteKey = r.key;
 
     _markers.removeWhere((m) =>
     m.markerId.value == 'route_o_${r.key}' ||
-        m.markerId.value == 'route_d_${r.key}');
+        m.markerId.value == 'route_d_${r.key}'
+    );
 
     await _applyActiveRoute(r);
   }
@@ -305,7 +387,8 @@ class _GpsMapPageState extends State<GpsMapPage> {
   Future<void> _applyActiveRoute(_RouteDoc r, {bool keepViewport = false}) async {
     _markers.removeWhere((m) =>
     m.markerId == const MarkerId('origin_pin') ||
-        m.markerId == const MarkerId('dest_pin'));
+        m.markerId == const MarkerId('dest_pin')
+    );
     _polylines.clear();
 
     if (r.polyline.isNotEmpty) {
@@ -351,7 +434,8 @@ class _GpsMapPageState extends State<GpsMapPage> {
     }
   }
 
-  // ================== GOOGLE DIRECTIONS FALLBACK ==================
+  /* ---------------- Directions fallback ---------------- */
+
   Future<void> _drawRouteBetween(
       LatLng origin,
       LatLng dest, [
@@ -415,7 +499,8 @@ class _GpsMapPageState extends State<GpsMapPage> {
     _controller?.animateCamera(CameraUpdate.newLatLngBounds(bounds, 60));
   }
 
-  // ---- helpers ----
+  /* ---------------- Helpers ---------------- */
+
   LatLngBounds _boundsFrom(List<LatLng> list) {
     double? minLat, maxLat, minLng, maxLng;
     for (final p in list) {
@@ -435,7 +520,8 @@ class _GpsMapPageState extends State<GpsMapPage> {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
   }
 
-  // ---- UI ----
+  /* ---------------- UI ---------------- */
+
   @override
   Widget build(BuildContext context) {
     final initial = _myPos ?? const LatLng(5.3540, 100.3010); // Penang default
@@ -453,6 +539,11 @@ class _GpsMapPageState extends State<GpsMapPage> {
                 child: Text(_summary!, style: const TextStyle(fontWeight: FontWeight.w600)),
               ),
             ),
+          IconButton(
+            tooltip: 'Locate buses',
+            icon: const Icon(Icons.directions_bus_filled),
+            onPressed: () => _fitToDrivers(force: true),
+          ),
         ],
       ),
       body: GoogleMap(
@@ -463,6 +554,7 @@ class _GpsMapPageState extends State<GpsMapPage> {
         onMapCreated: (c) => _controller = c,
         markers: _markers,
         polylines: _polylines,
+        circles: _circles,
       ),
       floatingActionButton: FloatingActionButton(
         backgroundColor: const Color(0xFFD32F2F),
@@ -480,7 +572,7 @@ class _GpsMapPageState extends State<GpsMapPage> {
   }
 }
 
-/* ===================== MODELS ===================== */
+/* ---------------- Model ---------------- */
 
 class _RouteDoc {
   final String key;

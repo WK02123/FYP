@@ -52,3 +52,5 @@ flutter:
     - assets/map/pin_pickup.png
     - assets/map/pin_drop.png
     - assets/map/pin_driver.png
+    - assets/map/car.png
+
