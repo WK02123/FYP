@@ -1,3 +1,4 @@
+// lib/driver_home_page.dart
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -56,13 +57,6 @@ class _DriverHomePageState extends State<DriverHomePage> {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
 
-    // Tabs: Home (Dashboard), GPS (placeholder), Profile
-    final pages = const [
-      DriverDashboard(),
-      _GpsPage(), // 👈 middle tab is GPS now
-      DriverProfilePage(),
-    ];
-
     final docRef = _fs.collection('drivers').doc(user.uid);
 
     return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
@@ -83,18 +77,30 @@ class _DriverHomePageState extends State<DriverHomePage> {
         final disabled = (data['disabled'] as bool?) ?? false;
         final blocking = disabled || !isOnline;
 
+        // Use your existing dashboard (no named args)
+        final pages = const [
+          DriverDashboard(),
+          DriverSchedulePage(),
+          DriverProfilePage(),
+        ];
+
         return Scaffold(
           appBar: AppBar(
             backgroundColor: const Color(0xFFD32F2F),
-            title: const Text('Driver'),
             foregroundColor: Colors.white,
+            title: const Text('Ridemate', style: TextStyle(fontWeight: FontWeight.w700)),
             actions: [
               Row(
                 children: [
-                  const Text('Online', style: TextStyle(color: Colors.white)),
+                  const Padding(
+                    padding: EdgeInsets.only(right: 6),
+                    child: Text('Online', style: TextStyle(color: Colors.white)),
+                  ),
                   Switch.adaptive(
                     value: isOnline && !disabled,
-                    onChanged: disabled ? null : (v) async {
+                    onChanged: disabled
+                        ? null
+                        : (v) async {
                       try {
                         await _setOnline(user.uid, v);
                         if (!v && mounted) {
@@ -114,13 +120,12 @@ class _DriverHomePageState extends State<DriverHomePage> {
                     inactiveThumbColor: Colors.white,
                     inactiveTrackColor: Colors.white24,
                   ),
-                  const SizedBox(width: 8),
+                  IconButton(
+                    tooltip: 'Sign out',
+                    icon: const Icon(Icons.logout),
+                    onPressed: _signOut,
+                  ),
                 ],
-              ),
-              IconButton(
-                tooltip: 'Sign out',
-                icon: const Icon(Icons.logout, color: Colors.white),
-                onPressed: _signOut,
               ),
             ],
           ),
@@ -130,124 +135,69 @@ class _DriverHomePageState extends State<DriverHomePage> {
               AbsorbPointer(
                 absorbing: blocking,
                 child: AnimatedOpacity(
-                  duration: const Duration(milliseconds: 200),
-                  opacity: blocking ? 0.4 : 1.0,
-                  child: pages[_index],
+                  duration: const Duration(milliseconds: 180),
+                  opacity: blocking ? 0.4 : 1,
+                  child: IndexedStack(index: _index, children: pages),
                 ),
               ),
               if (blocking)
-                Container(
-                  color: Colors.black.withOpacity(0.05),
-                  alignment: Alignment.center,
-                  padding: const EdgeInsets.all(20),
-                  child: ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 420),
-                    child: Card(
-                      elevation: 6,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(16),
+                Align(
+                  alignment: Alignment.topCenter,
+                  child: Container(
+                    margin: const EdgeInsets.all(12),
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: disabled ? const Color(0xFFFFEBEE) : const Color(0xFFFFF8E1),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: disabled ? const Color(0xFFE57373) : const Color(0xFFFFE082),
                       ),
-                      child: Padding(
-                        padding: const EdgeInsets.all(20),
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(disabled ? Icons.block : Icons.cloud_off,
-                                size: 56,
-                                color: disabled ? Colors.red : Colors.grey),
-                            const SizedBox(height: 12),
-                            Text(
-                              disabled ? 'Account Disabled' : 'You’re Offline',
-                              style: const TextStyle(
-                                  fontSize: 18, fontWeight: FontWeight.bold),
-                            ),
-                            const SizedBox(height: 8),
-                            Text(
-                              disabled
-                                  ? 'Please contact admin for access.'
-                                  : 'Go online to access dashboard, GPS, and profile.',
-                              textAlign: TextAlign.center,
-                              style: const TextStyle(color: Colors.black54),
-                            ),
-                            const SizedBox(height: 16),
-                            if (!disabled)
-                              ElevatedButton.icon(
-                                onPressed: () => _setOnline(user.uid, true),
-                                icon: const Icon(Icons.wifi),
-                                label: const Text('Go Online'),
-                                style: ElevatedButton.styleFrom(
-                                  backgroundColor: const Color(0xFFD32F2F),
-                                  foregroundColor: Colors.white,
-                                  minimumSize: const Size.fromHeight(44),
-                                  shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(12),
-                                  ),
-                                ),
-                              ),
-                            if (disabled) ...[
-                              const SizedBox(height: 12),
-                              const Text(
-                                'You can still sign out from the top-right.',
-                                style: TextStyle(color: Colors.black45, fontSize: 12),
-                              ),
-                            ],
-                          ],
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(disabled ? Icons.block : Icons.cloud_off,
+                            color: disabled ? const Color(0xFFC62828) : const Color(0xFFE65100)),
+                        const SizedBox(width: 8),
+                        Text(
+                          disabled ? 'Account disabled. Contact admin.'
+                              : 'Go online to enable dashboard & trips.',
+                          style: TextStyle(
+                            fontWeight: FontWeight.w600,
+                            color: disabled ? const Color(0xFFC62828) : const Color(0xFF6D4C41),
+                          ),
                         ),
-                      ),
+                      ],
                     ),
                   ),
                 ),
             ],
           ),
 
-          bottomNavigationBar: AbsorbPointer(
-            absorbing: blocking,
-            child: Opacity(
-              opacity: blocking ? 0.4 : 1.0,
-              child: BottomNavigationBar(
-                currentIndex: _index,
-                selectedItemColor: Colors.red,
-                unselectedItemColor: Colors.grey,
-                onTap: (i) {
-                  if (blocking) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(
-                        content: Text(disabled
-                            ? 'Account disabled by admin.'
-                            : 'Go online to use the app.'),
-                      ),
-                    );
-                    return;
-                  }
-                  setState(() => _index = i);
-                },
-                items: const [
-                  BottomNavigationBarItem(icon: Icon(Icons.home), label: ''),
-                  BottomNavigationBarItem(icon: Icon(Icons.map), label: ''), // 👈 GPS
-                  BottomNavigationBarItem(icon: Icon(Icons.person), label: ''),
-                ],
-              ),
-            ),
+          bottomNavigationBar: NavigationBar(
+            selectedIndex: _index,
+            onDestinationSelected: (i) {
+              if (blocking) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text(disabled
+                        ? 'Account disabled by admin.'
+                        : 'Go online to use the app.'),
+                  ),
+                );
+                return;
+              }
+              setState(() => _index = i);
+            },
+            indicatorColor: const Color(0xFFFFEBEE),
+            destinations: const [
+              NavigationDestination(icon: Icon(Icons.home_outlined), selectedIcon: Icon(Icons.home), label: 'Home'),
+              NavigationDestination(icon: Icon(Icons.event_note_outlined), selectedIcon: Icon(Icons.event_note), label: 'Trips'),
+              NavigationDestination(icon: Icon(Icons.person_outline), selectedIcon: Icon(Icons.person), label: 'Profile'),
+            ],
           ),
         );
       },
-    );
-  }
-}
-
-/// Simple placeholder GPS page
-class _GpsPage extends StatelessWidget {
-  const _GpsPage();
-
-  @override
-  Widget build(BuildContext context) {
-    return const Scaffold(
-      body: Center(
-        child: Text(
-          'GPS tracking coming soon',
-          style: TextStyle(color: Colors.grey),
-        ),
-      ),
     );
   }
 }

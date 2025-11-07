@@ -32,7 +32,7 @@
         <!-- Google Maps API key -->
         <meta-data
             android:name="com.google.android.geo.API_KEY"
-            android:value="AIzaSyDpZV-3ZumRV1ZjkB50Qt08vA3-IbY539k" />
+            android:value="AIzaSyALFYweoRynH9FVe9xRKXMs4YeebYHJm_w" />
 
         <!-- Flutter theme -->
         <meta-data

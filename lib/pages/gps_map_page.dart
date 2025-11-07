@@ -2,18 +2,17 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
-import 'dart:ui' as ui;                       // 👈 for bitmap scaling
+import 'dart:ui' as ui;
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart' show rootBundle; // 👈 for asset bytes
+import 'package:flutter/services.dart' show rootBundle;
 import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:http/http.dart' as http;
 import 'package:flutter_polyline_points/flutter_polyline_points.dart';
 
-/// --- Ensure we can read Firestore under your rules ---
 Future<void> _ensureSignedIn() async {
   final auth = FirebaseAuth.instance;
   if (auth.currentUser == null) {
@@ -22,7 +21,11 @@ Future<void> _ensureSignedIn() async {
 }
 
 class GpsMapPage extends StatefulWidget {
-  const GpsMapPage({super.key});
+  final String? routeKey;   // lock to a route if provided
+  final String? driverId;   // (optional) future filter
+
+  const GpsMapPage({super.key, this.routeKey, this.driverId});
+
   @override
   State<GpsMapPage> createState() => _GpsMapPageState();
 }
@@ -35,32 +38,31 @@ class _GpsMapPageState extends State<GpsMapPage> {
 
   final Set<Marker> _markers = {};
   final Set<Polyline> _polylines = {};
-  final Set<Circle> _circles = {};                 // soft halo for buses
+  final Set<Circle> _circles = {};
 
   StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _routesSub;
   StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _driversSub;
 
-  // Fallback Directions key if route has no saved polyline
-  static const String _directionsKey = 'YOUR_GOOGLE_KEY_HERE';
+  // Use your key or proxy if needed for fallback directions
+  static const String _directionsKey = 'GOOGLE_DIRECTIONS_KEY';
 
-  String? _summary; // distance • duration
+  String? _summary;
 
-  // Icons
   BitmapDescriptor? _pickupIcon;
   BitmapDescriptor? _dropIcon;
-  BitmapDescriptor? _carIcon;                     // 👈 fixed-size car
+  BitmapDescriptor? _carIcon;
 
-  // Config: car marker width (px)
-  static const int carWidthPx = 64;               // try 48 / 64 / 72
+  static const int carWidthPx = 64;
 
-  // Route cache + current active route key
   final Map<String, _RouteDoc> _routeIndex = {};
   String? _activeRouteKey;
 
-  // --- driver auto-center helpers ---
+  bool get _forcedRouteMode => widget.routeKey != null;
+
   bool _autoCenteredOnce = false;
-  List<Marker> _driverMarkers() =>
-      _markers.where((m) => m.markerId.value.startsWith('drv_')).toList();
+
+  // Live driver ticker (always-visible info at top)
+  List<_DriverInfo> _driverList = [];
 
   @override
   void initState() {
@@ -90,7 +92,7 @@ class _GpsMapPageState extends State<GpsMapPage> {
     final data = await rootBundle.load(path);
     final codec = await ui.instantiateImageCodec(
       data.buffer.asUint8List(),
-      targetWidth: width, // 👈 force fixed size
+      targetWidth: width,
     );
     final frame = await codec.getNextFrame();
     final bytes = (await frame.image.toByteData(format: ui.ImageByteFormat.png))!
@@ -109,7 +111,6 @@ class _GpsMapPageState extends State<GpsMapPage> {
         const ImageConfiguration(size: Size(48, 48)),
         'assets/map/pin_drop.png',
       );
-      // 👇 your bus icon, scaled to a fixed width
       _carIcon = await _bitmapFromAsset('assets/map/car.png', width: carWidthPx);
     } catch (_) {
       _pickupIcon = BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueGreen);
@@ -148,7 +149,6 @@ class _GpsMapPageState extends State<GpsMapPage> {
 
   void _subscribeRoutes() {
     _routesSub = _fs.collection('routes').snapshots().listen((snap) async {
-      // Keep non-route markers (drivers & active pins)
       final keep = _markers.where((m) =>
       !m.markerId.value.startsWith('route_o_') &&
           !m.markerId.value.startsWith('route_d_')
@@ -165,6 +165,8 @@ class _GpsMapPageState extends State<GpsMapPage> {
         final destGp   = data['destination'] as GeoPoint?;
         if (originGp == null || destGp == null) continue;
 
+        final active = (data['active'] as bool?) ?? true;
+
         final r = _RouteDoc(
           key: key,
           origin: LatLng(originGp.latitude, originGp.longitude),
@@ -174,29 +176,30 @@ class _GpsMapPageState extends State<GpsMapPage> {
           polyline: (data['polyline'] ?? '').toString(),
           distanceMeters: (data['distance_meters'] as num?)?.toInt(),
           durationSeconds: (data['duration_seconds'] as num?)?.toInt(),
+          active: active,
         );
         _routeIndex[key] = r;
 
-        if (_activeRouteKey == key) continue; // avoid duplicate pins
-
-        routeMarkers.add(
-          Marker(
-            markerId: MarkerId('route_o_$key'),
-            position: r.origin,
-            icon: _pickupIcon ?? BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueGreen),
-            infoWindow: InfoWindow(title: r.originName, snippet: 'Tap to view route'),
-            onTap: () => _showRoute(r),
-          ),
-        );
-        routeMarkers.add(
-          Marker(
-            markerId: MarkerId('route_d_$key'),
-            position: r.destination,
-            icon: _dropIcon ?? BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRose),
-            infoWindow: InfoWindow(title: r.destinationName, snippet: 'Tap to view route'),
-            onTap: () => _showRoute(r),
-          ),
-        );
+        if (!_forcedRouteMode && active) {
+          routeMarkers.add(
+            Marker(
+              markerId: MarkerId('route_o_$key'),
+              position: r.origin,
+              icon: _pickupIcon ?? BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueGreen),
+              infoWindow: InfoWindow(title: r.originName, snippet: 'Tap to view route'),
+              onTap: () => _showRoute(r),
+            ),
+          );
+          routeMarkers.add(
+            Marker(
+              markerId: MarkerId('route_d_$key'),
+              position: r.destination,
+              icon: _dropIcon ?? BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRose),
+              infoWindow: InfoWindow(title: r.destinationName, snippet: 'Tap to view route'),
+              onTap: () => _showRoute(r),
+            ),
+          );
+        }
       }
 
       setState(() {
@@ -206,35 +209,102 @@ class _GpsMapPageState extends State<GpsMapPage> {
           ..addAll(routeMarkers);
       });
 
-      // If active route doc changed, re-apply its polyline/pins
-      if (_activeRouteKey != null && _routeIndex[_activeRouteKey!] != null) {
-        _applyActiveRoute(_routeIndex[_activeRouteKey!]!, keepViewport: true);
+      if (_forcedRouteMode && widget.routeKey != null) {
+        final r = _routeIndex[widget.routeKey!];
+        if (r == null) return;
+        if (!r.active) {
+          _clearActiveRoute();
+          if (mounted) {
+            _summary = null;
+            setState(() {});
+          }
+        } else {
+          _activeRouteKey = r.key;
+          await _applyActiveRoute(r, keepViewport: true);
+        }
+      } else if (_activeRouteKey != null && _routeIndex[_activeRouteKey!] != null) {
+        final r = _routeIndex[_activeRouteKey!]!;
+        if (!r.active) {
+          _clearActiveRoute();
+          if (mounted) { _summary = null; setState(() {}); }
+        } else {
+          _applyActiveRoute(r, keepViewport: true);
+        }
       }
     }, onError: (e) => _snack('Routes stream error: $e'));
   }
 
-  /* ---------------- Drivers (active:true or status:"online") ---------------- */
+  /* ---------------- Drivers (status:"online" OR active:true) ---------------- */
 
   void _subscribeAllOnlineDrivers() {
-    _driversSub = _fs
-        .collection('drivers')
-        .where('active', isEqualTo: true)
-        .snapshots()
-        .listen((snap) async {
-      if (snap.docs.isEmpty) {
-        try {
-          final alt = await _fs
-              .collection('drivers')
-              .where('status', isEqualTo: 'online')
-              .get();
-          _applyDriverDocs(alt.docs);
-        } catch (e) {
-          _snack('Drivers (fallback) error: $e');
-        }
-      } else {
-        _applyDriverDocs(snap.docs);
-      }
+    _driversSub?.cancel();
+    _driversSub = _fs.collection('drivers').snapshots().listen((snap) {
+      // live filter: doc qualifies if position exists AND (online || active)
+      final live = snap.docs.where((d) {
+        final m = d.data();
+        final isOnline = (m['status'] ?? '').toString().toLowerCase() == 'online';
+        final isActive = (m['active'] as bool?) ?? false;
+        final hasLatLng = (m['lat'] is num && m['lng'] is num) || (m['pos'] is GeoPoint);
+        return hasLatLng && (isOnline || isActive);
+      }).toList();
+      _applyDriverDocs(live);
     }, onError: (e) => _snack('Drivers stream error: $e'));
+  }
+
+  Future<String> _labelForRouteKey(String routeKey) async {
+    // Try Firestore 'routes/<key>' for pretty names
+    try {
+      final doc = await _fs.collection('routes').doc(routeKey).get();
+      if (doc.exists) {
+        final m = doc.data()!;
+        final o = (m['originName'] ?? '').toString().trim();
+        final d = (m['destinationName'] ?? '').toString().trim();
+        if (o.isNotEmpty && d.isNotEmpty) return '$o → $d';
+      }
+    } catch (_) {
+      // ignore and fall back
+    }
+    // Fallback: split "Origin|Destination"
+    final parts = routeKey.split('|');
+    if (parts.length == 2) {
+      return '${parts[0].trim()} → ${parts[1].trim()}';
+    }
+    return routeKey.replaceAll('|', ' → ');
+  }
+
+  Future<String> _resolveDriverRouteLabel(String driverId, Map<String, dynamic> driver) async {
+    // 0) precomputed label
+    final built = (driver['routeLabel'] ?? '').toString().trim();
+    if (built.isNotEmpty) return built;
+
+    // 1) explicit current route key
+    final currentKey = (driver['currentRouteKey'] ?? '').toString().trim();
+    if (currentKey.isNotEmpty) return await _labelForRouteKey(currentKey);
+
+    // 2) routes[] can be strings or maps
+    final rawRoutes = driver['routes'];
+    if (rawRoutes is List && rawRoutes.isNotEmpty) {
+      // case A: list of strings
+      if (rawRoutes.first is String) {
+        final key = (rawRoutes.first as String).trim();
+        if (key.isNotEmpty) return await _labelForRouteKey(key);
+      }
+      // case B: list of maps
+      if (rawRoutes.first is Map) {
+        try {
+          final m = Map<String, dynamic>.from(rawRoutes.first as Map);
+          final mapKey = (m['key'] ?? '').toString().trim();
+          if (mapKey.isNotEmpty) return await _labelForRouteKey(mapKey);
+          final o = (m['origin'] ?? m['originName'] ?? '').toString().trim();
+          final d = (m['destination'] ?? m['destinationName'] ?? '').toString().trim();
+          if (o.isNotEmpty && d.isNotEmpty) return '$o → $d';
+        } catch (_) {/* ignore */}
+      }
+    }
+
+    // 3) last fallback: show something but not "On duty" if we know their bus
+    final bus = (driver['busCode'] ?? '').toString().trim();
+    return bus.isNotEmpty ? '$bus on duty' : 'On duty';
   }
 
   void _applyDriverDocs(List<QueryDocumentSnapshot<Map<String, dynamic>>> docs) async {
@@ -242,7 +312,8 @@ class _GpsMapPageState extends State<GpsMapPage> {
     _markers.removeWhere((m) => m.markerId.value.startsWith('drv_'));
     _circles.removeWhere((c) => c.circleId.value.startsWith('drv_'));
 
-    int shown = 0, missing = 0; int idx = 0;
+    final infos = <_DriverInfo>[];
+    int shown = 0; int idx = 0;
 
     for (final doc in docs) {
       final d = doc.data();
@@ -255,29 +326,30 @@ class _GpsMapPageState extends State<GpsMapPage> {
         lat = posGp.latitude;
         lng = posGp.longitude;
       }
-      if (lat == null || lng == null) { missing++; continue; }
+      if (lat == null || lng == null) continue;
 
       shown++;
       final pos = LatLng(lat, lng);
       final busCode  = (d['busCode'] ?? 'Bus').toString();
+      final name     = (d['name'] ?? '').toString();
       final heading  = (d['heading'] as num?)?.toDouble() ?? 0.0;
       final routeLbl = await _resolveDriverRouteLabel(doc.id, d);
 
-      // 👉 fixed-size custom car marker, rotated by heading if available
+      // Marker
+      final mkId = MarkerId('drv_${doc.id}');
       _markers.add(
         Marker(
-          markerId: MarkerId('drv_${doc.id}'),
+          markerId: mkId,
           position: pos,
           icon: _carIcon ?? BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRed),
-          rotation: heading,     // 0..360
+          rotation: heading,
           flat: true,
           anchor: const Offset(0.5, 0.5),
           zIndex: 10000.0 + idx,
-          infoWindow: InfoWindow(title: '🚌 $busCode', snippet: routeLbl),
+          infoWindow: InfoWindow(title: '🚌 $busCode${name.isNotEmpty ? ' • $name' : ''}', snippet: routeLbl),
         ),
       );
 
-      // Soft halo to make it pop
       _circles.add(
         Circle(
           circleId: CircleId('drv_${doc.id}_halo'),
@@ -290,50 +362,30 @@ class _GpsMapPageState extends State<GpsMapPage> {
         ),
       );
 
+      infos.add(_DriverInfo(busCode: busCode, name: name, routeLabel: routeLbl, latLng: pos));
       idx++;
     }
 
-    // Debug
-    // ignore: avoid_print
-    print('🗺️ Drivers snapshot: total=${docs.length}, shown=$shown, missingCoords=$missing');
+    if (mounted) {
+      setState(() {
+        _driverList = infos; // update persistent ticker
+      });
+    }
+
+    // Auto-show the first driver's infoWindow so info is visible without taps
+    if (shown > 0 && _controller != null && _markers.isNotEmpty) {
+      final first = _markers.firstWhere((m) => m.markerId.value.startsWith('drv_'));
+      _controller!.showMarkerInfoWindow(first.markerId);
+    }
 
     if (mounted) setState(() {});
-
     if (shown > 0) _fitToDrivers();
   }
 
-  Future<String> _resolveDriverRouteLabel(String driverId, Map<String, dynamic> driver) async {
-    final built = (driver['routeLabel'] ?? '').toString().trim();
-    if (built.isNotEmpty) return built;
+  /* ---------------- Camera helpers ---------------- */
 
-    try {
-      final ymd = _todayYmd();
-      final qs = await _fs
-          .collection('driver_trips')
-          .where('driverId', isEqualTo: driverId)
-          .where('date', isEqualTo: ymd)
-          .get();
-      if (qs.docs.isEmpty) return 'On duty';
-
-      DateTime now = DateTime.now();
-      Map<String, dynamic>? chosen;
-      DateTime? chosenTime;
-      for (final d in qs.docs) {
-        final m = d.data();
-        final t = _todayAt((m['time'] ?? '').toString());
-        if (t == null) continue;
-        if (!t.isBefore(now) && (chosenTime == null || t.isBefore(chosenTime!))) {
-          chosen = m; chosenTime = t;
-        }
-      }
-      chosen ??= qs.docs.first.data();
-      final origin = (chosen?['origin'] ?? 'Origin').toString();
-      final dest   = (chosen?['destination'] ?? 'Destination').toString();
-      return '$origin → $dest';
-    } catch (_) {
-      return 'On duty';
-    }
-  }
+  List<Marker> _driverMarkers() =>
+      _markers.where((m) => m.markerId.value.startsWith('drv_')).toList();
 
   void _fitToDrivers({bool force = false}) {
     if (_controller == null) return;
@@ -373,6 +425,7 @@ class _GpsMapPageState extends State<GpsMapPage> {
   /* ---------------- Open / apply active route ---------------- */
 
   Future<void> _showRoute(_RouteDoc r) async {
+    if (_forcedRouteMode) return;
     _summary = null;
     _activeRouteKey = r.key;
 
@@ -385,6 +438,12 @@ class _GpsMapPageState extends State<GpsMapPage> {
   }
 
   Future<void> _applyActiveRoute(_RouteDoc r, {bool keepViewport = false}) async {
+    if (!r.active) {
+      _clearActiveRoute();
+      if (mounted) { _summary = null; setState(() {}); }
+      return;
+    }
+
     _markers.removeWhere((m) =>
     m.markerId == const MarkerId('origin_pin') ||
         m.markerId == const MarkerId('dest_pin')
@@ -434,7 +493,15 @@ class _GpsMapPageState extends State<GpsMapPage> {
     }
   }
 
-  /* ---------------- Directions fallback ---------------- */
+  void _clearActiveRoute() {
+    _polylines.clear();
+    _markers.removeWhere((m) =>
+    m.markerId == const MarkerId('origin_pin') ||
+        m.markerId == const MarkerId('dest_pin')
+    );
+  }
+
+  /* ---------------- Directions fallback (direct to Google) ---------------- */
 
   Future<void> _drawRouteBetween(
       LatLng origin,
@@ -525,10 +592,11 @@ class _GpsMapPageState extends State<GpsMapPage> {
   @override
   Widget build(BuildContext context) {
     final initial = _myPos ?? const LatLng(5.3540, 100.3010); // Penang default
+    final lockedLabel = widget.routeKey;
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('GPS'),
+        title: Text(lockedLabel ?? 'GPS'),
         backgroundColor: const Color(0xFFD32F2F),
         foregroundColor: Colors.white,
         actions: [
@@ -546,15 +614,99 @@ class _GpsMapPageState extends State<GpsMapPage> {
           ),
         ],
       ),
-      body: GoogleMap(
-        initialCameraPosition: CameraPosition(target: initial, zoom: 14),
-        myLocationEnabled: true,
-        myLocationButtonEnabled: false,
-        zoomControlsEnabled: false,
-        onMapCreated: (c) => _controller = c,
-        markers: _markers,
-        polylines: _polylines,
-        circles: _circles,
+      body: Stack(
+        children: [
+          GoogleMap(
+            initialCameraPosition: CameraPosition(target: initial, zoom: 14),
+            myLocationEnabled: true,
+            myLocationButtonEnabled: false,
+            zoomControlsEnabled: false,
+            onMapCreated: (c) => _controller = c,
+            markers: _markers,
+            polylines: _polylines,
+            circles: _circles,
+          ),
+
+          // Always-visible live driver ticker (no click needed)
+          Positioned(
+            top: 12,
+            left: 12,
+            right: 12,
+            child: _driverList.isEmpty
+                ? const SizedBox.shrink()
+                : Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(12),
+                boxShadow: const [BoxShadow(blurRadius: 6, color: Colors.black12)],
+              ),
+              child: SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
+                  children: _driverList.map((d) {
+                    final title = d.busCode.isEmpty ? 'Bus' : d.busCode;
+                    final subtitle = d.name.isEmpty ? d.routeLabel : '${d.name} • ${d.routeLabel}';
+                    return Padding(
+                      padding: const EdgeInsets.only(right: 10),
+                      child: InkWell(
+                        onTap: () {
+                          if (_controller != null) {
+                            _controller!.animateCamera(CameraUpdate.newLatLngZoom(d.latLng, 17));
+                          }
+                        },
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFF7F7F7),
+                            border: Border.all(color: const Color(0xFFE0E0E0)),
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text('🚌 $title', style: const TextStyle(fontWeight: FontWeight.w700)),
+                              const SizedBox(height: 2),
+                              Text(subtitle, style: const TextStyle(fontSize: 12)),
+                            ],
+                          ),
+                        ),
+                      ),
+                    );
+                  }).toList(),
+                ),
+              ),
+            ),
+          ),
+
+          if (_forcedRouteMode && widget.routeKey != null)
+            StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+              stream: _fs.collection('routes').doc(widget.routeKey!).snapshots(),
+              builder: (context, snap) {
+                final active = (snap.data?.data()?['active'] as bool?) ?? true;
+                if (active) return const SizedBox.shrink();
+                return Positioned(
+                  bottom: 18,
+                  left: 12,
+                  right: 12,
+                  child: Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFFFF8E1),
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: const Color(0xFFFFE082)),
+                    ),
+                    child: Text(
+                      'This route has been cancelled by admin.',
+                      style: TextStyle(color: Colors.orange.shade800, fontWeight: FontWeight.w600),
+                      textAlign: TextAlign.center,
+                    ),
+                  ),
+                );
+              },
+            ),
+        ],
       ),
       floatingActionButton: FloatingActionButton(
         backgroundColor: const Color(0xFFD32F2F),
@@ -572,7 +724,15 @@ class _GpsMapPageState extends State<GpsMapPage> {
   }
 }
 
-/* ---------------- Model ---------------- */
+/* ---------------- Model types ---------------- */
+
+class _DriverInfo {
+  final String busCode;
+  final String name;
+  final String routeLabel;
+  final LatLng latLng;
+  _DriverInfo({required this.busCode, required this.name, required this.routeLabel, required this.latLng});
+}
 
 class _RouteDoc {
   final String key;
@@ -580,9 +740,10 @@ class _RouteDoc {
   final LatLng destination;
   final String originName;
   final String destinationName;
-  final String polyline; // encoded polyline from Firestore (optional)
+  final String polyline;
   final int? distanceMeters;
   final int? durationSeconds;
+  final bool active;
 
   _RouteDoc({
     required this.key,
@@ -593,5 +754,6 @@ class _RouteDoc {
     required this.polyline,
     required this.distanceMeters,
     required this.durationSeconds,
+    required this.active,
   });
 }

@@ -18,7 +18,6 @@ class LoginPage extends StatefulWidget {
 class _LoginPageState extends State<LoginPage> {
   final emailController = TextEditingController();
   final passwordController = TextEditingController();
-  bool isChecked = false;
   bool isLoading = false;
 
   Future<void> _login() async {
@@ -43,7 +42,7 @@ class _LoginPageState extends State<LoginPage> {
         return;
       }
 
-      // 1) Optional: block disabled accounts (checks users/ and drivers/)
+      // Check if account disabled (in users/ or drivers/)
       final usersDoc =
       await FirebaseFirestore.instance.collection('users').doc(user.uid).get();
       final driversDoc =
@@ -59,7 +58,7 @@ class _LoginPageState extends State<LoginPage> {
         return;
       }
 
-      // 2) Admin bypasses verification
+      // Admin bypasses verification
       final isAdmin = user.email?.toLowerCase() == 'admin@gmail.com';
       if (!isAdmin && !user.emailVerified) {
         await FirebaseAuth.instance.signOut();
@@ -68,7 +67,7 @@ class _LoginPageState extends State<LoginPage> {
         return;
       }
 
-      // 3) Resolve role (users/{uid}.role or drivers/{uid}.role; fallback student)
+      // Determine role
       String role = 'student';
       if (usersDoc.exists) {
         role = (usersDoc.data()?['role'] as String?)?.toLowerCase() ?? 'student';
@@ -76,7 +75,7 @@ class _LoginPageState extends State<LoginPage> {
         role = (driversDoc.data()?['role'] as String?)?.toLowerCase() ?? 'driver';
       }
 
-      // 4) Navigate by role (admin wins first)
+      // Navigate by role
       if (isAdmin) {
         _go(const AdminPage());
       } else if (role == 'driver') {
@@ -91,7 +90,9 @@ class _LoginPageState extends State<LoginPage> {
           msg = "No user found with this email.";
           break;
         case 'wrong-password':
-          msg = "Incorrect password.";
+        case 'invalid-credential':
+        case 'invalid-login-credentials':
+          msg = "Incorrect email or password.";
           break;
         case 'invalid-email':
           msg = "Invalid email format.";
@@ -99,8 +100,11 @@ class _LoginPageState extends State<LoginPage> {
         case 'user-disabled':
           msg = "This account has been disabled.";
           break;
+        case 'too-many-requests':
+          msg = "Too many attempts. Please try again later.";
+          break;
         default:
-          msg = "Login failed: ${e.message}";
+          msg = "Login failed. Please try again.";
       }
       _toast(msg);
     } catch (e) {
@@ -128,6 +132,7 @@ class _LoginPageState extends State<LoginPage> {
       backgroundColor: Colors.white,
       body: Column(
         children: [
+          // ===== Header Section =====
           Container(
             width: double.infinity,
             height: 200,
@@ -163,24 +168,20 @@ class _LoginPageState extends State<LoginPage> {
               ),
             ),
           ),
+
           const SizedBox(height: 30),
+
+          // ===== Input Fields =====
           _buildTextField("Email", emailController),
           const SizedBox(height: 20),
           _buildTextField("Password", passwordController, isPassword: true),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Row(
-                children: [
-                  Checkbox(
-                    value: isChecked,
-                    onChanged: (value) =>
-                        setState(() => isChecked = value ?? false),
-                  ),
-                  const Text("Remember me", style: TextStyle(fontSize: 12)),
-                ],
-              ),
-              TextButton(
+
+          // ===== Forgot Password only (removed remember me) =====
+          Align(
+            alignment: Alignment.centerRight,
+            child: Padding(
+              padding: const EdgeInsets.only(right: 30.0),
+              child: TextButton(
                 onPressed: () {
                   Navigator.push(
                     context,
@@ -191,10 +192,13 @@ class _LoginPageState extends State<LoginPage> {
                   "Forgot password?",
                   style: TextStyle(color: Colors.red),
                 ),
-              )
-            ],
+              ),
+            ),
           ),
+
           const SizedBox(height: 20),
+
+          // ===== Login Button =====
           isLoading
               ? const CircularProgressIndicator()
               : ElevatedButton(
@@ -207,7 +211,10 @@ class _LoginPageState extends State<LoginPage> {
             ),
             child: const Text("Login Now"),
           ),
+
           const SizedBox(height: 10),
+
+          // ===== Register Button =====
           OutlinedButton(
             onPressed: () {
               Navigator.pushReplacement(

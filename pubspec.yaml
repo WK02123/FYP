@@ -40,6 +40,7 @@ dependencies:
 
   # Networking
   http: ^1.2.2
+  app_links: ^6.4.1
 
 dev_dependencies:
   flutter_test:

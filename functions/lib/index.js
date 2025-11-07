@@ -23,7 +23,7 @@ var __importStar = (this && this.__importStar) || function (mod) {
     return result;
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.directions = exports.reportDriverIssue = exports.testPushNotification = exports.testScheduledNotifications = exports.runScheduledOnce = exports.checkScheduledNotifications = exports.sendTripReminder = exports.sendCancellationEmail = exports.sendBookingEmail = exports.refundPayment = exports.createPaymentIntent = exports.hello = exports.onStudentTripCreated = void 0;
+exports.placesText = exports.directions = exports.testPushNotification = exports.testScheduledNotifications = exports.runScheduledOnce = exports.checkScheduledNotifications = exports.sendTripReminder = exports.sendCancellationEmail = exports.sendBookingEmail = exports.refundPayment = exports.createPaymentIntent = exports.hello = exports.onStudentTripCreated = exports.reportDriverIssue = void 0;
 // functions/src/index.ts
 const https_1 = require("firebase-functions/v2/https");
 const scheduler_1 = require("firebase-functions/v2/scheduler");
@@ -32,33 +32,119 @@ const v2_1 = require("firebase-functions/v2");
 const dotenv = __importStar(require("dotenv"));
 const admin = __importStar(require("firebase-admin"));
 const params_1 = require("firebase-functions/params");
+const path = __importStar(require("path"));
+/* ========= Places Text Search Endpoint ========= */
+/* ─────────────────────────────────────────────────────────────
+   Environment bootstrap
+   - Loads normal .env
+   - Loads .env.local only when running the emulator
+   - Provides readSecret() to unify emulator vs prod secrets
+   ───────────────────────────────────────────────────────────── */
 dotenv.config();
+const IS_EMULATOR = process.env.FUNCTIONS_EMULATOR === "true" ||
+    process.env.FIREBASE_EMULATOR_HUB !== undefined;
+if (IS_EMULATOR) {
+    dotenv.config({ path: path.join(__dirname, "..", ".env.local") });
+}
+const readSecret = (name, param) => {
+    if (IS_EMULATOR)
+        return process.env[name] ?? "";
+    return param ? param.value() : "";
+};
+/* ───────────────────────────────────────────────────────────── */
 const REGION = "asia-southeast1";
 // Firebase Admin — initialize once
 if (!admin.apps.length) {
     admin.initializeApp();
     v2_1.logger.info("✅ firebase-admin initialized");
 }
-// ─────────────────────────────────────────────────────────────
-// Secrets (set in prod with CLI):
+// Secrets (prod via CLI)
 //   firebase functions:secrets:set STRIPE_SECRET
 //   firebase functions:secrets:set SENDGRID_API_KEY
-// ─────────────────────────────────────────────────────────────
+//   firebase functions:secrets:set GOOGLE_DIRECTIONS_KEY
 const STRIPE_SECRET = (0, params_1.defineSecret)("STRIPE_SECRET");
 const SENDGRID_API_KEY = (0, params_1.defineSecret)("SENDGRID_API_KEY");
-// ─────────────────────────────────────────────────────────────
-// Load .env.local only when running the emulator
-// ─────────────────────────────────────────────────────────────
-const path = __importStar(require("path"));
-const IS_EMULATOR = process.env.FUNCTIONS_EMULATOR === "true" ||
-    process.env.FIREBASE_EMULATOR_HUB !== undefined;
-// load .env.local only in emulator
-if (IS_EMULATOR) {
-    dotenv.config({ path: path.join(__dirname, "..", ".env.local") });
-}
-// ─────────────────────────────────────────────────────────────
-// Helpers
-// ─────────────────────────────────────────────────────────────
+const GOOGLE_DIRECTIONS_KEY = (0, params_1.defineSecret)("GOOGLE_DIRECTIONS_KEY");
+// Small accessor so we never think about env again
+// (underscored to silence ESLint unused-var rule)
+const _getGoogleMapsKey = () => readSecret("GOOGLE_DIRECTIONS_KEY", GOOGLE_DIRECTIONS_KEY);
+/* ------------------------------------------------------------------
+   Callable: Driver reports an issue → notify affected students
+-------------------------------------------------------------------*/
+exports.reportDriverIssue = (0, https_1.onCall)({ region: REGION }, async (request) => {
+    if (!request.auth)
+        throw new https_1.HttpsError("unauthenticated", "Sign in required");
+    const { origin, destination, date, time, type, note, delayMinutes } = (request.data ?? {});
+    if (!origin || !destination || !date || !time) {
+        throw new https_1.HttpsError("invalid-argument", "origin, destination, date, time are required");
+    }
+    try {
+        const db = admin.firestore();
+        const driverId = request.auth.uid;
+        // 1) Log
+        await db.collection("driver_issues").add({
+            driverId,
+            origin, destination, date, time,
+            type: type ?? "Issue",
+            note: note ?? "",
+            delayMinutes: delayMinutes ?? 0,
+            createdAt: new Date(),
+        });
+        // 2) Find students on that exact trip
+        const qs = await db.collection("student_trips")
+            .where("origin", "==", origin)
+            .where("destination", "==", destination)
+            .where("date", "==", date)
+            .where("time", "==", time)
+            .get();
+        if (qs.empty) {
+            v2_1.logger.info(`reportDriverIssue: no students for ${origin}→${destination} ${date} ${time}`);
+            return { success: true, sent: 0 };
+        }
+        const delayText = delayMinutes && delayMinutes > 0 ? ` (~${delayMinutes} min delay)` : "";
+        const body = `Route ${origin} → ${destination} at ${time} will be delayed${delayText}. ${type ?? "Issue"} reported by driver.`;
+        // 3) Notify
+        let sent = 0;
+        for (const doc of qs.docs) {
+            const trip = doc.data();
+            const studentId = trip.studentId;
+            if (!studentId)
+                continue;
+            const collectionsToCheck = ["users", "students", "profiles", "drivers"];
+            let fcmToken = null;
+            for (const col of collectionsToCheck) {
+                const d = await db.collection(col).doc(studentId).get();
+                if (d.exists) {
+                    fcmToken = d.data()?.fcmToken ?? null;
+                    if (fcmToken)
+                        break;
+                }
+            }
+            if (!fcmToken)
+                continue;
+            await admin.messaging().send({
+                token: fcmToken,
+                notification: { title: "⏱️ Route Delay Notice", body },
+                data: {
+                    type: "route_delay",
+                    origin, destination, date, time,
+                    channelId: "route_alerts",
+                },
+                android: { priority: "high", notification: { sound: "default", channelId: "route_alerts" } },
+            });
+            sent++;
+        }
+        v2_1.logger.info(`reportDriverIssue: sent ${sent} notifications for ${origin}→${destination} ${date} ${time}`);
+        return { success: true, sent };
+    }
+    catch (e) {
+        v2_1.logger.error("reportDriverIssue error:", e);
+        throw new https_1.HttpsError("internal", e?.message ?? "Failed to process driver issue");
+    }
+});
+/* ------------------------------------------------------------------
+   Helpers for Stripe / SendGrid (kept same behavior as your code)
+-------------------------------------------------------------------*/
 const getStripe = () => {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const Stripe = require("stripe");
@@ -84,7 +170,6 @@ const getNodemailer = () => {
 /* ------------------------------------------------------------------
    FCM token resolvers
 -------------------------------------------------------------------*/
-// Use the top-level admin (most places)
 const resolveFcmToken = async (userId, isDriver = false) => {
     const db = admin.firestore();
     const tried = [];
@@ -102,7 +187,6 @@ const resolveFcmToken = async (userId, isDriver = false) => {
     }
     return { fcmToken: null, tried };
 };
-// Use a provided _admin instance (inside runScheduledScan which lazy-loads)
 const resolveFcmTokenWith = async (_admin, userId, isDriver = false) => {
     const db = _admin.firestore();
     const tried = [];
@@ -135,8 +219,9 @@ exports.onStudentTripCreated = (0, firestore_1.onDocumentCreated)({ region: REGI
         return;
     }
     try {
-        // Idempotency log
-        const logRef = admin.firestore().collection("notification_logs").doc(`booking_confirmed_${tripId}`);
+        const logRef = admin.firestore()
+            .collection("notification_logs")
+            .doc(`booking_confirmed_${tripId}`);
         try {
             await logRef.create({
                 type: "booking_confirmed",
@@ -161,23 +246,12 @@ exports.onStudentTripCreated = (0, firestore_1.onDocumentCreated)({ region: REGI
         const timeText = trip.time12 ?? trip.time ?? "";
         await admin.messaging().send({
             token: fcmToken,
-            notification: {
-                title: "✅ Booking confirmed",
-                body: `${origin} → ${destination} on ${date} • ${timeText}`,
-            },
+            notification: { title: "✅ Booking confirmed", body: `${origin} → ${destination} on ${date} • ${timeText}` },
             data: {
                 type: "booking_confirmed",
-                origin,
-                destination,
-                date,
-                time: timeText,
-                tripId,
-                channelId: "booking_updates",
+                origin, destination, date, time: timeText, tripId, channelId: "booking_updates",
             },
-            android: {
-                priority: "high",
-                notification: { sound: "default", channelId: "booking_updates" },
-            },
+            android: { priority: "high", notification: { sound: "default", channelId: "booking_updates" } },
         });
         await logRef.update({ status: "sent", sentAt: new Date().toISOString() });
         v2_1.logger.info(`📣 Booking-confirmed push sent for ${tripId} to ${studentId}`);
@@ -185,7 +259,7 @@ exports.onStudentTripCreated = (0, firestore_1.onDocumentCreated)({ region: REGI
     catch (e) {
         v2_1.logger.error("onStudentTripCreated push failed:", e);
     }
-});
+}); // keep this closing );
 /* ------------------------------------------------------------------
    Email template helpers
 -------------------------------------------------------------------*/
@@ -342,7 +416,6 @@ exports.sendBookingEmail = (0, https_1.onCall)({ region: REGION, secrets: [SENDG
             secure: false,
             auth: { user: "apikey", pass: getSendgridKey() },
         });
-        // MUST be a verified Single Sender in your SendGrid account
         const from = { name: "Ridemate Shuttle", address: "heartx8880@gmail.com" };
         await transporter.sendMail({
             from,
@@ -428,9 +501,7 @@ exports.sendTripReminder = (0, https_1.onCall)({ region: REGION }, async (reques
 /* ------------------------------------------------------------------
    Scheduled Notification Scanner (runs every 1 minute)
 -------------------------------------------------------------------*/
-async function runScheduledScan(backfillMs = 5 * 60 * 1000, // pick up slightly-late items
-lookaheadMs = 1 * 60 * 1000 // scan 1 minute ahead
-) {
+async function runScheduledScan(backfillMs = 5 * 60 * 1000, lookaheadMs = 1 * 60 * 1000) {
     // Lazy-load admin here for isolation
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const _admin = require("firebase-admin");
@@ -456,7 +527,6 @@ lookaheadMs = 1 * 60 * 1000 // scan 1 minute ahead
         const time = data.time ?? "";
         const isDriver = !!data.isDriver;
         try {
-            // Prefer snapshot token; fallback to live lookup with _admin
             let fcmToken = data.snapshotFcmToken || "";
             let tried = ["snapshotFcmToken"];
             if (!fcmToken) {
@@ -482,10 +552,7 @@ lookaheadMs = 1 * 60 * 1000 // scan 1 minute ahead
                     time,
                     channelId: "trip_reminders",
                 },
-                android: {
-                    priority: "high",
-                    notification: { sound: "default", channelId: "trip_reminders" },
-                },
+                android: { priority: "high", notification: { sound: "default", channelId: "trip_reminders" } },
             });
             await doc.ref.update({ status: "sent", sentAt: new Date().toISOString() });
             v2_1.logger.info(`✅ Reminder sent to ${userId} for ${origin} → ${destination} @ ${time}`);
@@ -503,7 +570,7 @@ exports.checkScheduledNotifications = (0, scheduler_1.onSchedule)({ schedule: "e
 // Manual HTTP trigger for testing
 exports.runScheduledOnce = (0, https_1.onRequest)({ region: REGION }, async (_req, res) => {
     try {
-        await runScheduledScan(30 * 60 * 1000, 10 * 60 * 1000); // wider window for manual runs
+        await runScheduledScan(30 * 60 * 1000, 10 * 60 * 1000);
         res.status(200).send("ok");
     }
     catch (e) {
@@ -608,121 +675,91 @@ exports.testPushNotification = (0, https_1.onRequest)({ region: REGION }, async 
         res.status(500).json({ success: false, error: String(error) });
     }
 });
-// ─────────────────────────────────────────────────────────────
-// Driver reports an issue → notify affected students for that trip
-// ─────────────────────────────────────────────────────────────
-exports.reportDriverIssue = (0, https_1.onCall)({ region: REGION }, async (request) => {
-    if (!request.auth)
-        throw new https_1.HttpsError("unauthenticated", "Sign in required");
-    const { origin, destination, date, time, type, note, delayMinutes } = (request.data ?? {});
-    if (!origin || !destination || !date || !time) {
-        throw new https_1.HttpsError("invalid-argument", "origin, destination, date, time are required");
-    }
-    try {
-        const db = admin.firestore();
-        const driverId = request.auth.uid;
-        // 1) Log the issue
-        await db.collection("driver_issues").add({
-            driverId,
-            origin,
-            destination,
-            date,
-            time,
-            type: type ?? "Issue",
-            note: note ?? "",
-            delayMinutes: delayMinutes ?? 0,
-            // 🔧 Use plain Date to avoid FieldValue/Timestamp API differences
-            createdAt: new Date(),
-        });
-        // 2) Find students for that exact trip
-        const qs = await db.collection("student_trips")
-            .where("origin", "==", origin)
-            .where("destination", "==", destination)
-            .where("date", "==", date) // e.g. "2025-10-23"
-            .where("time", "==", time) // e.g. "12:00" or "12:00 PM" (must match stored format)
-            .get();
-        if (qs.empty) {
-            v2_1.logger.info(`reportDriverIssue: no students for ${origin}→${destination} ${date} ${time}`);
-            return { success: true, sent: 0 };
-        }
-        // 3) Build message
-        const delayText = delayMinutes && delayMinutes > 0 ? ` (~${delayMinutes} min delay)` : "";
-        const body = `Route ${origin} → ${destination} at ${time} will be delayed${delayText}. ${type ?? "Issue"} reported by driver.`;
-        // 4) Notify each student
-        let sent = 0;
-        for (const doc of qs.docs) {
-            const trip = doc.data();
-            const studentId = trip.studentId;
-            if (!studentId)
-                continue;
-            // Resolve FCM: users > students > profiles > drivers
-            const collectionsToCheck = ["users", "students", "profiles", "drivers"];
-            let fcmToken = null;
-            for (const col of collectionsToCheck) {
-                const d = await db.collection(col).doc(studentId).get();
-                if (d.exists) {
-                    fcmToken = d.data()?.fcmToken ?? null;
-                    if (fcmToken)
-                        break;
-                }
-            }
-            if (!fcmToken)
-                continue;
-            await admin.messaging().send({
-                token: fcmToken,
-                notification: { title: "⏱️ Route Delay Notice", body },
-                data: {
-                    type: "route_delay",
-                    origin, destination, date, time,
-                    channelId: "route_alerts",
-                },
-                android: {
-                    priority: "high",
-                    notification: { sound: "default", channelId: "route_alerts" },
-                },
-            });
-            sent++;
-        }
-        v2_1.logger.info(`reportDriverIssue: sent ${sent} notifications for ${origin}→${destination} ${date} ${time}`);
-        return { success: true, sent };
-    }
-    catch (e) {
-        v2_1.logger.error("reportDriverIssue error:", e);
-        throw new https_1.HttpsError("internal", e?.message ?? "Failed to process driver issue");
-    }
-});
-// --- Directions API secret + helper (ADD) ---
-const GOOGLE_DIRECTIONS_KEY = (0, params_1.defineSecret)("GOOGLE_DIRECTIONS_KEY");
+/* ------------------------------------------------------------------
+   Maps: Directions proxy (uses auto env key)
+-------------------------------------------------------------------*/
 exports.directions = (0, https_1.onRequest)({ region: REGION, secrets: [GOOGLE_DIRECTIONS_KEY] }, async (req, res) => {
     try {
-        const origin = req.query.origin || "";
-        const destination = req.query.destination || "";
-        const mode = (req.query.mode || "driving").toLowerCase();
+        const origin = String((req.query.origin ?? "") || (req.body?.origin ?? ""));
+        const destination = String((req.query.destination ?? "") || (req.body?.destination ?? ""));
+        const mode = String((req.query.mode ?? "") || (req.body?.mode ?? "driving")).toLowerCase();
+        const waypoints = (req.query.waypoints ?? req.body?.waypoints)
+            ? `&waypoints=${encodeURIComponent(String(req.query.waypoints ?? req.body?.waypoints))}`
+            : "";
         if (!origin || !destination) {
-            res.status(400).json({ status: "INVALID_REQUEST", error: "origin and destination are required" });
+            res.status(400).json({
+                status: "INVALID_REQUEST",
+                error: "origin and destination are required",
+            });
             return;
         }
-        // Emulator vs prod: pick the key
-        const isEmulator = process.env.FUNCTIONS_EMULATOR === "true" ||
-            process.env.FIREBASE_EMULATOR_HUB !== undefined;
-        const key = isEmulator
-            ? process.env.GOOGLE_DIRECTIONS_KEY
-            : GOOGLE_DIRECTIONS_KEY.value();
+        const key = GOOGLE_DIRECTIONS_KEY.value();
         if (!key) {
-            res.status(500).json({ status: "INTERNAL", error: "GOOGLE_DIRECTIONS_KEY not configured" });
+            res.status(500).json({
+                status: "INTERNAL",
+                error: "GOOGLE_DIRECTIONS_KEY not configured",
+            });
             return;
         }
-        // Call Google Directions
-        const url = new URL("https://maps.googleapis.com/maps/api/directions/json");
-        url.searchParams.set("origin", origin); // "lat,lng"
-        url.searchParams.set("destination", destination); // "lat,lng"
-        url.searchParams.set("mode", mode); // driving/walking/transit
-        url.searchParams.set("key", key);
-        const gRes = await fetch(url.toString());
-        const gJson = await gRes.json();
+        const url = "https://maps.googleapis.com/maps/api/directions/json" +
+            `?origin=${encodeURIComponent(origin)}` +
+            `&destination=${encodeURIComponent(destination)}` +
+            `&mode=${encodeURIComponent(mode)}` +
+            waypoints +
+            `&key=${key}`;
+        const gRes = await fetch(url);
+        const gJson = (await gRes.json());
+        if (gJson.status !== "OK")
+            console.error("Directions error:", gJson);
         res.status(200).json(gJson);
     }
     catch (e) {
-        res.status(500).json({ status: "INTERNAL", error: e?.message ?? String(e) });
+        res.status(500).json({
+            status: "INTERNAL",
+            error: e?.message ?? String(e),
+        });
+    }
+});
+/* ========= Places Text Search Endpoint ========= */
+exports.placesText = (0, https_1.onRequest)({ region: REGION, secrets: [GOOGLE_DIRECTIONS_KEY] }, async (req, res) => {
+    try {
+        const query = String((req.query.query ?? "") || (req.body?.query ?? ""));
+        if (!query) {
+            res.status(400).json({
+                status: "INVALID_REQUEST",
+                error: "query required",
+            });
+            return;
+        }
+        const region = String((req.query.region ?? "") || (req.body?.region ?? "my"));
+        const location = (req.query.location ?? req.body?.location)
+            ? `&location=${encodeURIComponent(String(req.query.location ?? req.body?.location))}`
+            : "";
+        const radius = String((req.query.radius ?? "") || (req.body?.radius ?? "40000"));
+        const key = GOOGLE_DIRECTIONS_KEY.value();
+        if (!key) {
+            res.status(500).json({
+                status: "INTERNAL",
+                error: "GOOGLE_DIRECTIONS_KEY not configured",
+            });
+            return;
+        }
+        const url = "https://maps.googleapis.com/maps/api/place/textsearch/json" +
+            `?query=${encodeURIComponent(query)}` +
+            `&region=${encodeURIComponent(region)}` +
+            location +
+            `&radius=${encodeURIComponent(radius)}` +
+            `&key=${key}`;
+        const gRes = await fetch(url);
+        const gJson = (await gRes.json());
+        if (gJson.status && gJson.status !== "OK")
+            console.error("Places error:", gJson);
+        res.status(200).json(gJson);
+    }
+    catch (e) {
+        res.status(500).json({
+            status: "INTERNAL",
+            error: e?.message ?? String(e),
+        });
     }
 });

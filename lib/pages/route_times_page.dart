@@ -16,15 +16,12 @@ class RouteTimesPage extends StatefulWidget {
 class _RouteTimesPageState extends State<RouteTimesPage> {
   final _fs = FirebaseFirestore.instance;
 
-  // ========= Keys / Endpoints =========
-  static const String _directionsKey = 'AIzaSyBq_qP5gXHGTYVWnlr8MqX6d3uEQnAnCO4';
-
-  // Toggle when you deploy
+  // ========= Cloud Functions base (emulator vs prod) =========
   static const bool _useEmulator = true; // true = local emulator, false = prod
   static const String _projectId = 'shuttlebus-e0cef';
   static const String _region = 'asia-southeast1';
 
-  String get _cfDirectionsBase {
+  String get _cfBase {
     if (_useEmulator) {
       final host = kIsWeb ? '127.0.0.1' : (Platform.isAndroid ? '10.0.2.2' : '127.0.0.1');
       return 'http://$host:5001/$_projectId/$_region';
@@ -433,7 +430,7 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
 
     try {
       final url = Uri.parse(
-        '$_cfDirectionsBase/directions'
+        '$_cfBase/directions'
             '?origin=${_originStop!.lat},${_originStop!.lng}'
             '&destination=${_destStop!.lat},${_destStop!.lng}'
             '&mode=driving',
@@ -448,18 +445,18 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
       final routes = (data['routes'] as List?) ?? [];
       if (routes.isEmpty) { _snack('No route found between the two points.'); return; }
 
-      final r0 = routes[0];
+      final r0 = routes[0] as Map<String, dynamic>;
       _encodedPolyline = (r0['overview_polyline']?['points'] ?? '').toString();
       if (_encodedPolyline == null || _encodedPolyline!.isEmpty) { _snack('Directions returned empty polyline.'); return; }
       final decoded = PolylinePoints().decodePolyline(_encodedPolyline!);
 
       final legs = (r0['legs'] as List?) ?? [];
       _distanceMeters = legs.fold<int>(0, (a, l) {
-        final v = (l['distance']?['value'] ?? 0) as num;
+        final v = ((l as Map<String,dynamic>)['distance']?['value'] ?? 0) as num;
         return a + v.toInt();
       });
       _durationSeconds = legs.fold<int>(0, (a, l) {
-        final v = (l['duration']?['value'] ?? 0) as num;
+        final v = ((l as Map<String,dynamic>)['duration']?['value'] ?? 0) as num;
         return a + v.toInt();
       });
 
@@ -509,7 +506,6 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
       return;
     }
 
-    // Map payload we want to save
     final mapFields = {
       'originStopId': _originStop!.id,
       'originName'  : _originStop!.name,
@@ -523,31 +519,26 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
       'updatedAt'        : FieldValue.serverTimestamp(),
     };
 
-    // Compute new key from names (trim + single-space)
     final newKey = _makeKeyFromNames(_originStop!.name, _destStop!.name);
     final oldKey = _selectedRouteKey!;
 
     if (newKey == oldKey) {
-      // Simple update in-place
       await _fs.collection('routes').doc(oldKey).set(mapFields, SetOptions(merge: true));
       _snack('Map route saved');
       await _loadRoute(oldKey);
       return;
     }
 
-    // Key changed: copy meta to new doc, delete old doc, update selection
     final oldDoc = await _fs.collection('routes').doc(oldKey).get();
     final old = oldDoc.data() ?? {};
 
     final newDocData = {
-      // meta
       'capacity' : _capacity,
       'busCode'  : _busCodeCtrl.text.trim(),
       'driverId' : _driverIdCtrl.text.trim(),
       'priceSen' : _parsePriceToSen(_priceCtrl.text),
       'times'    : _times,
       'active'   : (old['active'] ?? true),
-      // map
       ...mapFields,
     };
 
@@ -579,28 +570,30 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
     return s;
   }
 
-  // ====== Place search ======
+  // ====== Place search (via CF) ======
   Future<void> _searchPlace(String query) async {
     if (query.trim().isEmpty) return _snack('Enter a location name');
     setState(() => _searchingPlace = true);
 
     final url = Uri.parse(
-      'https://maps.googleapis.com/maps/api/place/textsearch/json'
+      '$_cfBase/placesText'
           '?query=${Uri.encodeComponent(query)}'
           '&region=my'
           '&location=${_penangCenter.latitude},${_penangCenter.longitude}'
-          '&radius=40000'
-          '&key=$_directionsKey',
+          '&radius=40000',
     );
 
     try {
       final res = await http.get(url);
+      if (res.statusCode != 200) { _snack('Places error: HTTP ${res.statusCode}'); return; }
       final data = json.decode(res.body);
-      final results = (data['results'] as List?) ?? [];
-      if (res.statusCode != 200 || results.isEmpty) { _snack('No place found'); return; }
+      if ((data['status'] ?? '') != 'OK') { _snack('Places failed: ${data['status'] ?? 'UNKNOWN'}'); return; }
 
-      final first = results.first;
-      final geo = first['geometry']?['location'] ?? {};
+      final results = (data['results'] as List?) ?? [];
+      if (results.isEmpty) { _snack('No place found'); return; }
+
+      final first = results.first as Map<String, dynamic>;
+      final geo = (first['geometry']?['location'] ?? {}) as Map<String, dynamic>;
       final name = (first['name'] ?? query).toString();
       final pos = LatLng((geo['lat'] as num).toDouble(), (geo['lng'] as num).toDouble());
 
@@ -774,13 +767,8 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
                                     if (_selectedRouteKey == null) { _snack('Pick a route first'); return; }
                                     final result = await Navigator.of(context).push<_PickerResult>(
                                       MaterialPageRoute(
-                                        builder: (_) => _MapPickerPage(
-                                          apiKey: _directionsKey,
-                                          initialCenter: _originStop != null
-                                              ? LatLng(_originStop!.lat, _originStop!.lng)
-                                              : (_destStop != null
-                                              ? LatLng(_destStop!.lat, _destStop!.lng)
-                                              : _defaultCenter),
+                                        builder: (_) => const _MapPickerPage(
+                                          initialCenter: _penangCenter,
                                         ),
                                         fullscreenDialog: true,
                                       ),
@@ -835,13 +823,8 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
                                   onTap: (_) async {
                                     final result = await Navigator.of(context).push<_PickerResult>(
                                       MaterialPageRoute(
-                                        builder: (_) => _MapPickerPage(
-                                          apiKey: _directionsKey,
-                                          initialCenter: _originStop != null
-                                              ? LatLng(_originStop!.lat, _originStop!.lng)
-                                              : (_destStop != null
-                                              ? LatLng(_destStop!.lat, _destStop!.lng)
-                                              : _defaultCenter),
+                                        builder: (_) => const _MapPickerPage(
+                                          initialCenter: _penangCenter,
                                         ),
                                         fullscreenDialog: true,
                                       ),
@@ -1062,9 +1045,8 @@ class _RouteTimesPageState extends State<RouteTimesPage> {
 /* ===================== FULL-SCREEN MAP PICKER ===================== */
 
 class _MapPickerPage extends StatefulWidget {
-  final String apiKey;
   final LatLng initialCenter;
-  const _MapPickerPage({required this.apiKey, required this.initialCenter});
+  const _MapPickerPage({required this.initialCenter});
 
   @override
   State<_MapPickerPage> createState() => _MapPickerPageState();
