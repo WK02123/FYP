@@ -7,7 +7,8 @@ import 'manage_bookings_page.dart';
 import 'manage_users_page.dart';
 import 'create_driver_page.dart';
 import 'reset_driver_password_page.dart';
-import 'route_times_page.dart'; // 👈 NEW
+import 'route_times_page.dart';
+import 'leave_approval_page.dart'; // 👈 NEW
 
 class AdminPage extends StatelessWidget {
   const AdminPage({super.key});
@@ -96,7 +97,6 @@ class AdminPage extends StatelessWidget {
                 );
               },
             ),
-            // 🌟 NEW TILE
             _tile(
               context,
               title: "Route Times",
@@ -106,6 +106,20 @@ class AdminPage extends StatelessWidget {
                 Navigator.push(
                   context,
                   MaterialPageRoute(builder: (_) => const RouteTimesPage()),
+                );
+              },
+            ),
+            // 👇 NEW TILE
+            _tile(
+              context,
+              title: "Driver Leave Requests",
+              icon: Icons.event_busy,
+              color: Colors.red,
+              onTap: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                      builder: (_) => const LeaveApprovalPage()),
                 );
               },
             ),

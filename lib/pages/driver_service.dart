@@ -209,13 +209,12 @@ class DriverService {
       ),
     ).listen((pos) async {
       // ignore: avoid_print
-      print('📍 Driver GPS = ${pos.latitude}, ${pos.longitude}, heading=${pos.heading}');
+      print(
+          '📍 Driver GPS = ${pos.latitude}, ${pos.longitude}, heading=${pos.heading}');
       try {
         await _fs.collection('drivers').doc(uid).set({
-          // doubles — many clients consume this
           'lat': pos.latitude,
           'lng': pos.longitude,
-          // also publish as GeoPoint for schema-agnostic reads
           'pos': GeoPoint(pos.latitude, pos.longitude),
           'heading': pos.heading,
           'status': 'online',
@@ -257,7 +256,7 @@ class DriverService {
 
     await _fs.collection('leave_requests').add({
       'driverId': uid,
-      'driverEmail': _email(),
+      'driverEmail': _email(),        // optional – useful for debugging
       'from': Timestamp.fromDate(from),
       'to': Timestamp.fromDate(to),
       'reason': reason,

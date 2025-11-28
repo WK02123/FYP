@@ -1,5 +1,7 @@
+// lib/pages/leave_request_page.dart
 import 'package:flutter/material.dart';
-import 'driver_service.dart';
+import 'package:shuttle_bus_app/pages/driver_service.dart';
+
 
 class LeaveRequestPage extends StatefulWidget {
   const LeaveRequestPage({super.key});
@@ -61,7 +63,9 @@ class _LeaveRequestPageState extends State<LeaveRequestPage> {
               title: Text(dateText),
               onTap: () async {
                 await _pickDate(from: true);
-                if (mounted && _from != null) await _pickDate(from: false);
+                if (mounted && _from != null) {
+                  await _pickDate(from: false);
+                }
               },
             ),
             const SizedBox(height: 12),
@@ -81,20 +85,26 @@ class _LeaveRequestPageState extends State<LeaveRequestPage> {
               onPressed: () async {
                 if (_from == null || _to == null) {
                   ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('Please select date range')),
+                    const SnackBar(
+                        content: Text('Please select date range')),
                   );
                   return;
                 }
                 setState(() => _sending = true);
                 try {
                   await DriverService.instance.requestLeave(
-                    from: DateTime(_from!.year, _from!.month, _from!.day, 0, 0),
-                    to: DateTime(_to!.year, _to!.month, _to!.day, 23, 59),
-                    reason: _reason.text.trim().isEmpty ? 'N/A' : _reason.text.trim(),
+                    from: DateTime(
+                        _from!.year, _from!.month, _from!.day, 0, 0),
+                    to: DateTime(
+                        _to!.year, _to!.month, _to!.day, 23, 59),
+                    reason: _reason.text.trim().isEmpty
+                        ? 'N/A'
+                        : _reason.text.trim(),
                   );
                   if (!mounted) return;
                   ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('Leave request sent')),
+                    const SnackBar(
+                        content: Text('Leave request sent')),
                   );
                   Navigator.pop(context);
                 } catch (e) {
